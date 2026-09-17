@@ -1,0 +1,3440 @@
+#!/usr/bin/env bash
+#===============================================================================
+# htop-s — Linux 服务器实时监控终端面板
+#
+# 版本: 2.0.0
+# 依赖: bash >= 3.2, awk (POSIX), coreutils
+# 数据: 全部来自 /proc 与 /sys, 不使用 ss/netstat/ps/free/iostat
+#
+# 用法速查:
+#   htop-s                  实时面板
+#   htop-s --check          环境自检
+#   sudo htop-s --install   安装 + 开机自启
+#   htop-s --help           完整帮助
+#
+# 文档: htop-s-使用手册.md  /  规格: htop-s-开发方案.md
+#===============================================================================
+
+set -u
+
+VERSION="0.0.1"
+PROG="htop-s"
+
+#===============================================================================
+# 0. 根目录 (支持测试时覆写)
+#===============================================================================
+PROC_ROOT="${HT_S_PROC:-/proc}"
+SYS_ROOT="${HT_S_ROOT:-/sys}"
+ETC_ROOT="${HT_S_ETC:-/etc}"
+
+#===============================================================================
+# 1. 全局状态 (set -u 要求全部预初始化)
+#===============================================================================
+INTERVAL=2
+DAEMON_INTERVAL=5
+IFACE_LIST=""
+OUT_LANG="zh"
+USE_ASCII=0
+MODE="interactive"
+OPT_LOG_LINES=30
+OPT_ALERT_LINES=30
+OPT_HISTORY=12
+OPT_PURGE=0
+OPT_WITH_MOTD=0
+CLI_QUOTA=""
+CLI_RESET_DAY=""
+CLI_KEEP=""
+CLI_IFACE=""
+CLI_ACCT=""
+CLI_INTERVAL=""
+OPT_PORTS=0
+CLI_UPDATE=""
+CLI_PROXY=""
+OPT_FORCE=0
+
+# 发布仓库 (由 init 写入 Release 与 api 地址; 可用配置 repo_owner/repo_name 覆盖)
+REPO_OWNER="zhang123999-qq"
+REPO_NAME="htop-s"
+HT_S_PROXY=""
+
+HAS_TPUT=0; HAS_NFT=0; HAS_SYSTEMCTL=0; HAS_FLOCK=0; HAS_GZIP=0
+HAS_CURL=0; HAS_WGET=0
+HAS_SORT=0; HAS_READLINK=0; HAS_STTY=0
+PAGESIZE=4096
+CLK_TCK=100
+TERM_COLS=80
+TERM_ROWS=24
+
+C_RESET=""; C_BOLD=""; C_DIM=""
+C_RED=""; C_GREEN=""; C_YELLOW=""; C_CYAN=""; C_MAGENTA=""; C_BLUE=""; C_WHITE=""
+
+PREV_CPU=""; PREV_CPU_CORES=""; PREV_UPTIME=""; PREV_MID_UPTIME=""
+PREV_RX=0; PREV_TX=0; PREV_RXERR=0; PREV_TXERR=0; PREV_RXDROP=0; PREV_TXDROP=0
+PREV_DSK_RD=0; PREV_DSK_WR=0; PREV_DSK_RC=0; PREV_DSK_WC=0; PREV_DSK_IOT=0
+PREV_PG_IN=0; PREV_PG_OUT=0
+PREV_SEG_IN=0; PREV_SEG_OUT=0; PREV_SEG_RET=0; PREV_UDP_ERR=0; PREV_UDP_BUF=0
+
+T_FAST=0; T_MID=0; T_SLOW=0
+LAST_DATE=""
+
+CV_CPU_TOTAL=0; CV_CPU_USER=0; CV_CPU_SYS=0; CV_CPU_IO=0
+CV_CPU_IRQ=0; CV_CPU_SOFT=0; CV_CPU_STEAL=0
+CV_CORES=""
+CV_MEM_TOTAL=0; CV_MEM_USED=0; CV_MEM_AVAIL=0; CV_SWAP_TOTAL=0; CV_SWAP_USED=0
+CV_MEM_CACHE=0; CV_MEM_DIRTY=0; CV_MEM_WB=0
+CV_PG_IN=0; CV_PG_OUT=0; CV_OOM=0
+CV_LOAD1=0; CV_LOAD5=0; CV_LOAD15=0; CV_RUNNING=0; CV_TOTPROC=0
+CV_RX_RATE=0; CV_TX_RATE=0; CV_RX_TOTAL=0; CV_TX_TOTAL=0
+CV_RXERR=0; CV_TXERR=0; CV_RXDROP=0; CV_TXDROP=0
+CV_TCP_TOTAL=0; CV_TCP_EST=0; CV_TCP_SYN=0; CV_TCP_TW=0; CV_TCP_CW=0
+CV_TCP_LISTEN=0; CV_TCP_FIN1=0; CV_TCP_FIN2=0; CV_TCP_LAST=0
+CV_TCP_CLOSING=0; CV_TCP_SYNSENT=0
+CV_UDP_TOTAL=0
+CV_PEAK_RX=0; CV_PEAK_TX=0
+CV_NET_DOWN_INC=0; CV_NET_UP_INC=0
+CV_PROC_MODE="c"
+CV_TCP_PEERS=""
+CV_TCP_PORTS=""
+
+MV_DISK_RD=0; MV_DISK_WR=0; MV_DISK_IOPS=0; MV_DISK_UTIL=0
+MV_RETRANS=0; MV_LIS_OVF=0; MV_LIS_DROP=0; MV_SYN_RET=0; MV_SYNCOOKIE=0
+MV_TW_OVF=0; MV_UDP_INERR=0; MV_UDP_RCVBUF=0
+MV_CONNTRACK=0; MV_CONNTRACK_MAX=0
+MV_PROCS=""; MV_PORTS=""; MV_PORTS_ON=0
+
+SV_DISK=""; SV_INODE=""; SV_TEMP=""; SV_OS=""; SV_KERNEL=""; SV_ARCH=""
+SV_HOST=""; SV_CORES_N=1; SV_USERS=0; SV_ZOMBIE=0; SV_UPTIME=0; SV_SYSTEMD_FAIL=0
+SV_IP=""
+
+ST_MODE="proc"; ST_PERIOD_START=""; ST_RESET_DAY=1; ST_QUOTA=0
+ST_NFT_RX_DONE=0; ST_NFT_TX_DONE=0; ST_NFT_RX_LAST=0; ST_NFT_TX_LAST=0
+ST_PROC_RX_BASE=0; ST_PROC_TX_BASE=0; ST_PROC_RX_LAST=0; ST_PROC_TX_LAST=0
+ST_UPTIME_LAST=0; ST_TS_LAST=0
+CV_PERIOD_RX=0; CV_PERIOD_TX=0
+CV_QUOTA_PCT=0; CV_QUOTA_ETA=0; CV_INCOMPLETE=0
+
+NET_HIST_RX=""; NET_HIST_TX=""
+ALERT_STATE_LINE=""; NOTIFY_CMD=""
+DISK_WHOLE=""
+BUILD_INFO=""
+
+STATE_FILE=""; CONF_FILE=""; LOG_DIR=""; ALERT_FILE=""; PID_FILE=""; LOCK_FILE=""
+BIN_PATH="/usr/local/bin/htop-s"
+SERVICE_FILE="/etc/systemd/system/htop-s.service"
+MOTD_FILE="/etc/profile.d/htop-s.sh"
+CONF_DIR="/etc/htop-s"
+TMPD=""
+
+SAVED_STTY=""; IS_TTY=0
+RENDER_MS=0
+# 界面开关 (必须在 parse_args 之前初始化为 0, 否则会覆盖命令行参数)
+MINIMAL=0
+PAUSED=0
+SHOW_CORES=0
+MV_PORTS_ON=0
+
+#===============================================================================
+# 2. 文本 (中/英)
+#===============================================================================
+init_i18n() {
+    if [ "$OUT_LANG" = "en" ]; then
+        T_TITLE="SERVER MONITOR"
+        T_UPTIME="uptime"; T_LOAD="Load"; T_PROCS="procs"; T_CORES="cores"
+        T_CPU="CPU"; T_MEM="Memory"; T_SWAP="Swap"; T_DISK="Disk"; T_DISKIO="Disk IO"
+        T_IFACE="NIC"; T_IP="IP"; T_CUM="Total"; T_LIVE="Live"; T_PEAK="Peak"
+        T_DOWN="down"; T_UP="up"; T_SUM="sum"; T_ERR="err"; T_DROP="drop"
+        T_TCP="TCP"; T_UDP="UDP"; T_LISTEN="LISTEN"; T_TOPCPU="Top CPU processes"
+        T_MONTH="This month"; T_EST="forecast"; T_INCOMPLETE="DATA INCOMPLETE"
+        T_PID="PID"; T_THR="THR"; T_ST="ST"; T_CMD="COMMAND"; T_MEMCOL="MEM"
+        T_USER="user"; T_SYS="sys"; T_IO="iowait"; T_STEAL="steal"
+        T_KEYS="[q]uit [space]pause [c/m]sort [1]cores [p]ports [?]help"
+        T_HELP="HELP"; T_PRESS_ANY="press any key to return"
+        T_KEYS_HELP_1="q / Ctrl-C  quit and restore terminal"
+        T_KEYS_HELP_2="space       pause / resume"
+        T_KEYS_HELP_3="c / m       sort processes by CPU / memory"
+        T_KEYS_HELP_4="1 / p       toggle per-core view / port to process map"
+        T_CACHE="cache"; T_RETRANS="retrans"; T_OVERFLOW="listen overflow"
+        T_SWAPIN="swap in"; T_SWAPOUT="swap out"
+        T_REFRESH="refresh"; T_RENDER="render"
+        T_ALREADY="daemon already running, pid:"; T_DAEMON_READY="daemon started, log dir:"
+        T_DSTATE="D-state process, IO blocked"; T_NEEDROOT="need root"
+        T_NA="N/A"; T_USERS="logins"; T_ZOMBIE="zombie"; T_FAILED="failed units"
+        T_ALERT="ALERTS"; T_NONE="none"; T_UNKNOWN="unknown"
+        T_INODE="inode"; T_READ="rd"; T_WRITE="wr"; T_UTIL="util"
+        T_TEMP="temp"; T_QUOTA="Quota"; T_DAY="days"
+        T_PAUSED="PAUSED"; T_SORTCPU="sort:CPU"; T_SORTMEM="sort:MEM"
+        T_OVER="OVER QUOTA"; T_DELETED="deleted files"
+        T_ESTAB="ESTAB"; T_LOADHINT="/core"; T_TOP="Top"; T_PORTMAP="Port to process"
+    else
+        T_TITLE="服务器实时监控"
+        T_UPTIME="已运行"; T_LOAD="负载"; T_PROCS="进程"; T_CORES="核"
+        T_CPU="CPU"; T_MEM="内存"; T_SWAP="交换"; T_DISK="磁盘"; T_DISKIO="磁盘 IO"
+        T_IFACE="网卡"; T_IP="IP"; T_CUM="累计"; T_LIVE="实时"; T_PEAK="峰值"
+        T_DOWN="下行"; T_UP="上行"; T_SUM="合计"; T_ERR="错误"; T_DROP="丢包"
+        T_TCP="TCP"; T_UDP="UDP"; T_LISTEN="监听"; T_TOPCPU="CPU 占用 TOP 进程"
+        T_MONTH="本月"; T_EST="预计月底"; T_INCOMPLETE="数据不完整"
+        T_PID="PID"; T_THR="线程"; T_ST="状态"; T_CMD="命令行"; T_MEMCOL="内存"
+        T_USER="用户态"; T_SYS="内核态"; T_IO="IO等待"; T_STEAL="被抢占"
+        T_KEYS="[q]退出 [空格]暂停 [c/m]排序 [1]每核 [p]端口 [?]帮助"
+        T_HELP="帮助"; T_PRESS_ANY="按任意键返回"
+        T_KEYS_HELP_1="q / Ctrl-C  退出并恢复终端"
+        T_KEYS_HELP_2="空格        暂停 / 继续刷新"
+        T_KEYS_HELP_3="c / m       进程按 CPU / 内存 排序"
+        T_KEYS_HELP_4="1 / p       展开每核视图 / 端口→进程映射"
+        T_CACHE="缓存"; T_RETRANS="重传"; T_OVERFLOW="队列溢出"
+        T_SWAPIN="换页in"; T_SWAPOUT="换页out"
+        T_REFRESH="刷新"; T_RENDER="渲染"
+        T_ALREADY="后台采集已在运行, pid:"; T_DAEMON_READY="后台采集已启动, 日志目录:"
+        T_DSTATE="D 状态进程, IO 阻塞"; T_NEEDROOT="需要 root"
+        T_NA="N/A"; T_USERS="登录"; T_ZOMBIE="僵尸"; T_FAILED="失败单元"
+        T_ALERT="告警"; T_NONE="无"; T_UNKNOWN="未知"
+        T_INODE="inode"; T_READ="读"; T_WRITE="写"; T_UTIL="利用率"
+        T_TEMP="温度"; T_QUOTA="配额"; T_DAY="天"
+        T_PAUSED="已暂停"; T_SORTCPU="排序:CPU"; T_SORTMEM="排序:内存"
+        T_OVER="已超配额"; T_DELETED="已删除未释放"
+        T_ESTAB="已建立"; T_LOADHINT="/核"; T_TOP="TOP"; T_PORTMAP="端口 → 进程"
+    fi
+}
+
+#===============================================================================
+# 3. 能力探测
+#===============================================================================
+detect_caps() {
+    [ -t 1 ] && command -v tput >/dev/null 2>&1 && HAS_TPUT=1
+    command -v nft >/dev/null 2>&1 && HAS_NFT=1
+    command -v systemctl >/dev/null 2>&1 && HAS_SYSTEMCTL=1
+    command -v flock >/dev/null 2>&1 && HAS_FLOCK=1
+    command -v gzip >/dev/null 2>&1 && HAS_GZIP=1
+    command -v sort >/dev/null 2>&1 && HAS_SORT=1
+    command -v readlink >/dev/null 2>&1 && HAS_READLINK=1
+    command -v curl >/dev/null 2>&1 && HAS_CURL=1
+    command -v wget >/dev/null 2>&1 && HAS_WGET=1
+    command -v stty >/dev/null 2>&1 && HAS_STTY=1
+    local v
+    v=$(getconf PAGESIZE 2>/dev/null)
+    is_num "${v:-}" && PAGESIZE=$v
+    v=$(getconf CLK_TCK 2>/dev/null)
+    is_num "${v:-}" && CLK_TCK=$v
+    [ -t 0 ] && [ -t 1 ] && IS_TTY=1
+}
+
+init_colors() {
+    C_RESET=""; C_BOLD=""; C_DIM=""
+    C_RED=""; C_GREEN=""; C_YELLOW=""; C_CYAN=""; C_MAGENTA=""; C_BLUE=""; C_WHITE=""
+    [ "$USE_ASCII" = "1" ] && return 0
+    [ -n "${NO_COLOR:-}" ] && return 0
+    [ -t 1 ] || return 0
+    C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
+    C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
+    C_CYAN=$'\033[36m'; C_MAGENTA=$'\033[35m'; C_BLUE=$'\033[34m'; C_WHITE=$'\033[37m'
+}
+
+term_width() {
+    local w=""
+    [ "$HAS_TPUT" = "1" ] && w=$(tput cols 2>/dev/null)
+    is_num "${w:-}" || w="${COLUMNS:-}"
+    is_num "${w:-}" || w=$(stty size 2>/dev/null | awk '{print $2}')
+    is_num "${w:-}" || w=80
+    [ "$w" -lt 20 ] && w=80
+    TERM_COLS=$w
+}
+
+term_height() {
+    local h=""
+    [ "$HAS_TPUT" = "1" ] && h=$(tput lines 2>/dev/null)
+    is_num "${h:-}" || h=$(stty size 2>/dev/null | awk '{print $1}')
+    is_num "${h:-}" || h=24
+    [ "$h" -lt 5 ] && h=24
+    TERM_ROWS=$h
+}
+
+is_num() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+
+#===============================================================================
+# 4. 单位与格式 (纯 shell, 不 fork)
+#===============================================================================
+human_bytes() {
+    local n="${1:-0}" neg="" r
+    case "$n" in -*) neg="-"; n=${n#-} ;; esac
+    is_num "$n" || n=0
+    if   [ "$n" -ge 1099511627776 ]; then r=$(( n % 1099511627776 )); n=$(( n / 1099511627776 )); r=$(( r * 10 / 1099511627776 )); printf '%s%d.%dTB' "$neg" "$n" "$r"
+    elif [ "$n" -ge 1073741824 ];    then r=$(( n % 1073741824 ));    n=$(( n / 1073741824 ));    r=$(( r * 10 / 1073741824 ));    printf '%s%d.%dGB' "$neg" "$n" "$r"
+    elif [ "$n" -ge 1048576 ];       then r=$(( n % 1048576 ));       n=$(( n / 1048576 ));       r=$(( r * 10 / 1048576 ));       printf '%s%d.%dMB' "$neg" "$n" "$r"
+    elif [ "$n" -ge 1024 ];          then r=$(( n % 1024 ));          n=$(( n / 1024 ));          r=$(( r * 10 / 1024 ));          printf '%s%d.%dKB' "$neg" "$n" "$r"
+    else printf '%s%dB' "$neg" "$n"
+    fi
+}
+
+human_rate() { human_bytes "${1:-0}"; printf '/s'; }
+
+human_size_from_kb() { human_bytes "$(( ${1:-0} * 1024 ))"; }
+
+fmt_uptime() {
+    local s="${1:-0}" d h m
+    is_num "${s%%.*}" || s=0
+    s=${s%%.*}
+    d=$(( s / 86400 )); h=$(( (s % 86400) / 3600 )); m=$(( (s % 3600) / 60 ))
+    if [ "$OUT_LANG" = "en" ]; then printf '%dd %dh %dm' "$d" "$h" "$m"
+    else printf '%d天%d小时%d分' "$d" "$h" "$m"; fi
+}
+
+pct_color() {
+    local p="${1:-0}"
+    is_num "${p%%.*}" || p=0
+    p=${p%%.*}
+    if [ "$p" -ge 85 ]; then printf '%s' "$C_RED"
+    elif [ "$p" -ge 60 ]; then printf '%s' "$C_YELLOW"
+    else printf '%s' "$C_GREEN"; fi
+}
+
+bar() {
+    local pct="${1:-0}" width="${2:-20}" filled i out=""
+    is_num "${pct%%.*}" || pct=0
+    pct=${pct%%.*}
+    [ "$width" -lt 1 ] && width=1
+    filled=$(( pct * width / 100 ))
+    [ "$filled" -gt "$width" ] && filled=$width
+    [ "$filled" -lt 0 ] && filled=0
+    i=0
+    if [ "$USE_ASCII" = "1" ]; then
+        while [ "$i" -lt "$filled" ]; do out="${out}#"; i=$(( i + 1 )); done
+        while [ "$i" -lt "$width" ]; do out="${out}-"; i=$(( i + 1 )); done
+    else
+        while [ "$i" -lt "$filled" ]; do out="${out}█"; i=$(( i + 1 )); done
+        while [ "$i" -lt "$width" ]; do out="${out}░"; i=$(( i + 1 )); done
+    fi
+    printf '%s' "$out"
+}
+
+hr_line() {
+    local w="${1:-60}" i=0 out="" ch="-"
+    [ "$USE_ASCII" = "1" ] || ch="─"
+    [ "$w" -lt 1 ] && w=1
+    while [ "$i" -lt "$w" ]; do out="${out}${ch}"; i=$(( i + 1 )); done
+    printf '%s' "$out"
+}
+
+seg() { printf '%s%s%s' "$C_DIM" "$1" "$C_RESET"; }
+bold() { printf '%s%s%s' "$C_BOLD" "$1" "$C_RESET"; }
+
+sparkline() {
+    local data="$1" width="$2" max="$3"
+    awk -v d="$data" -v w="$width" -v mx="$max" -v asc="$USE_ASCII" '
+    BEGIN {
+        if (asc == 1) chars = " .:-=+*@"
+        else chars = "▁▂▃▄▅▆▇█"
+        n = split(d, a, " ")
+        if (n == 0 || w < 1) { print ""; exit }
+        if (mx <= 0) mx = 1
+        start = n - w + 1; if (start < 1) start = 1
+        s = ""
+        for (i = start; i <= n; i++) {
+            v = a[i] + 0
+            idx = int(v / mx * 7) + 1
+            if (idx > 8) idx = 8
+            if (idx < 1) idx = 1
+            s = s substr(chars, idx, 1)
+        }
+        print s
+    }'
+}
+
+#===============================================================================
+# 5. 采集层 — 基础
+#===============================================================================
+read_uptime() { awk '{print $1}' "$PROC_ROOT/uptime" 2>/dev/null || printf '0'; }
+
+read_cpu() {
+    awk '/^cpu /{printf "%s %s %s %s %s %s %s %s\n", $2, $3, $4, $5, $6, $7, $8, $9+0; exit}' "$PROC_ROOT/stat" 2>/dev/null
+}
+
+read_cpu_cores() {
+    awk '/^cpu[0-9]+ /{printf "%s %s %s %s %s %s %s %s\n", $2, $3, $4, $5, $6, $7, $8, $9+0}' "$PROC_ROOT/stat" 2>/dev/null
+}
+
+cpu_delta() {
+    printf '%s\n%s\n' "${2:-}" "${1:-}" | awk '
+    BEGIN { ok = 0 }
+    NR == 1 { if (split($0, p, " ") >= 8) ok = 1 }
+    NR == 2 { if (split($0, c, " ") < 8) ok = 0 }
+    END {
+        if (!ok) { print "0.0 0.0 0.0 0.0 0.0 0.0 0.0"; exit }
+        t = 0
+        for (i = 1; i <= 8; i++) t += (c[i] - p[i])
+        if (t <= 0) { print "0.0 0.0 0.0 0.0 0.0 0.0 0.0"; exit }
+        busy = 100 - (c[4]-p[4])/t*100 - (c[5]-p[5])/t*100
+        usr = (c[1]-p[1])/t*100
+        sys = ((c[3]-p[3]) + (c[6]-p[6]) + (c[7]-p[7]))/t*100
+        io  = (c[5]-p[5])/t*100
+        irq = (c[6]-p[6])/t*100
+        sof = (c[7]-p[7])/t*100
+        st  = (c[8]-p[8])/t*100
+        if (busy < 0) busy = 0
+        if (busy > 100) busy = 100
+        printf "%.1f %.1f %.1f %.1f %.1f %.1f %.1f", busy, usr, sys, io, irq, sof, st
+    }'
+}
+
+cpu_cores_delta() {
+    printf '%s\n@@@\n%s\n' "${2:-}" "${1:-}" | awk '
+    /^@@@$/ { cur = 1; next }
+    !cur { if ($0 == "") next; split($0, p[++np], " "); next }
+    { if ($0 == "") next
+      split($0, c, " ")
+      nc++
+      if (!(nc in p)) { printf "0 "; next }
+      t = 0
+      for (i = 1; i <= 8; i++) t += (c[i] - p[nc][i])
+      if (t <= 0) printf "0 "
+      else { v = 100 - (c[4]-p[nc][4])/t*100 - (c[5]-p[nc][5])/t*100
+             if (v < 0) v = 0; if (v > 100) v = 100
+             printf "%d ", v }
+    }
+    END { printf "\n" }'
+}
+
+read_mem() {
+    [ -r "$PROC_ROOT/meminfo" ] || { printf '0 0 0 0 0 0 0 0'; return; }
+    awk '
+    /^MemTotal:/{t=$2} /^MemFree:/{f=$2} /^MemAvailable:/{a=$2}
+    /^Buffers:/{b=$2} /^Cached:/{c=$2} /^SReclaimable:/{sr=$2} /^Shmem:/{sh=$2}
+    /^Dirty:/{d=$2} /^Writeback:/{wb=$2}
+    /^SwapTotal:/{st=$2} /^SwapFree:/{sf=$2}
+    END {
+        if (a == "") a = f + b + c
+        cache = c + sr - sh
+        if (cache < 0) cache = 0
+        used = t - a; if (used < 0) used = 0
+        printf "%d %d %d %d %d %d %d %d\n", t*1024, used*1024, st*1024, (st-sf)*1024, cache*1024, d*1024, wb*1024, a*1024
+    }' "$PROC_ROOT/meminfo" 2>/dev/null
+}
+
+read_loadavg() {
+    [ -r "$PROC_ROOT/loadavg" ] || { printf '0 0 0 0 0 0'; return; }
+    awk '{
+        split($4, a, "/")
+        printf "%s %s %s %s %s %s\n", $1+0, $2+0, $3+0, a[1]+0, a[2]+0, $5+0
+    }' "$PROC_ROOT/loadavg" 2>/dev/null
+}
+
+read_vmstat() {
+    [ -r "$PROC_ROOT/vmstat" ] || { printf '0 0 0'; return; }
+    awk '
+    /^pswpin /{i=$2} /^pswpout /{o=$2} /^oom_kill /{k=$2}
+    END { printf "%d %d %d\n", i+0, o+0, k+0 }' "$PROC_ROOT/vmstat" 2>/dev/null
+}
+
+read_core_count() {
+    local n
+    n=$(awk '/^cpu[0-9]+ /{n++} END{print n+0}' "$PROC_ROOT/stat" 2>/dev/null)
+    is_num "${n:-}" || n=1
+    [ "$n" -lt 1 ] && n=1
+    printf '%s' "$n"
+}
+
+#===============================================================================
+# 6. 采集层 — 磁盘
+#===============================================================================
+disk_capacity() {
+    local top="${1:-3}"
+    { df -PT 2>/dev/null || df -P 2>/dev/null; } | awk -v top="$top" '
+    NR == 1 {
+        gnu = 0
+        for (i = 1; i <= NF; i++) if ($i == "Type") gnu = 1
+        next
+    }
+    {
+        if (gnu) { type = $2; used = $4; size = $3; cap = $6; mnt = $7 }
+        else     { next }
+        if (type ~ /^(tmpfs|devtmpfs|squashfs|overlay|ramfs|proc|sysfs|devpts|autofs|bpf|configfs|cgroup|debugfs|tracefs|securityfs|pstore|mqueue|hugetlbfs|efivarfs|nsfs|fuse)/) next
+        if (type ~ /^(nfs|nfs4|cifs|smb3|afs|9p)/) next
+        if (mnt ~ /^\/(dev|proc|sys|run)\//) next
+        p = cap; sub(/%/, "", p); p += 0
+        printf "%d|%s|%s|%s\n", p, mnt, used, size
+    }' | sort -rn 2>/dev/null | head -n "$top"
+}
+
+disk_inode() {
+    df -Pi 2>/dev/null | awk '
+    NR == 1 {
+        for (i = 1; i <= NF; i++) if ($i ~ /^IUse%/) { ip = i; mp = i + 1; break }
+        next
+    }
+    ip == 0 { next }
+    {
+        p = $ip; sub(/%/, "", p); p += 0
+        mnt = $mp
+        if (mnt ~ /^\/(dev|proc|sys|run)\//) next
+        if (p > max) { max = p; mm = mnt }
+    }
+    END { printf "%d|%s\n", max+0, mm }'
+}
+
+disk_whole_list() {
+    local d out=""
+    if [ -d "$SYS_ROOT/block" ]; then
+        for d in "$SYS_ROOT"/block/*; do
+            [ -e "$d" ] || continue
+            d=${d##*/}
+            case "$d" in loop*|ram*|zram*|fd*|sr*|nbd*) continue ;; esac
+            out="${out}${out:+ }$d"
+        done
+    fi
+    [ -z "$out" ] && out="sda"
+    printf '%s' "$out"
+}
+
+read_diskstats() {
+    local want="$1"
+    [ -r "$PROC_ROOT/diskstats" ] || { printf '0 0 0 0 0'; return; }
+    awk -v w="$want" '
+    BEGIN { n = split(w, a, " "); for (i = 1; i <= n; i++) W[a[i]] = 1 }
+    $3 in W { rd += $6; wr += $10; rc += $4; wc += $8; iot += $13 }
+    END { printf "%d %d %d %d %d\n", rd, wr, rc, wc, iot }' "$PROC_ROOT/diskstats" 2>/dev/null
+}
+
+#===============================================================================
+# 7. 采集层 — 网络
+#===============================================================================
+iface_detect() {
+    local d s out=""
+    if [ -d "$SYS_ROOT/class/net" ]; then
+        for d in "$SYS_ROOT"/class/net/*; do
+            [ -e "$d" ] || continue
+            d=${d##*/}
+            case "$d" in lo|docker*|veth*|br-*|virbr*|tun*|tap*|wg*|zt*|dummy*|sit*|ip6tnl*) continue ;; esac
+            s=$(cat "$SYS_ROOT/class/net/$d/operstate" 2>/dev/null)
+            if [ "$s" = "up" ]; then out="$d"; break; fi
+            [ -z "$out" ] && out="$d"
+        done
+    fi
+    if [ -z "$out" ] && [ -r "$PROC_ROOT/net/dev" ]; then
+        out=$(awk 'NR > 2 { i = $1; sub(/:$/, "", i); if (i !~ /^(lo|docker|veth|br-|virbr|tun|tap|wg|zt)/) { print i; exit } }' "$PROC_ROOT/net/dev")
+    fi
+    [ -z "$out" ] && out="eth0"
+    printf '%s' "$out"
+}
+
+net_read() {
+    [ -r "$PROC_ROOT/net/dev" ] || { printf '0 0 0 0 0 0'; return; }
+    awk -v list="$IFACE_LIST" '
+    BEGIN { n = split(list, a, " "); for (i = 1; i <= n; i++) W[a[i]] = 1 }
+    NR > 2 {
+        i = $1; sub(/:$/, "", i)
+        if (!(i in W)) next
+        rx += $2; tx += $10; re += $4; te += $12; rd += $5; td += $13
+    }
+    END { printf "%d %d %d %d %d %d\n", rx+0, tx+0, re+0, te+0, rd+0, td+0 }' "$PROC_ROOT/net/dev" 2>/dev/null
+}
+
+iface_ip() {
+    local i="$1" ip=""
+    if command -v ip >/dev/null 2>&1; then
+        ip=$(ip -4 -o addr show dev "$i" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+    fi
+    if [ -z "$ip" ] && command -v hostname >/dev/null 2>&1; then
+        ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+    printf '%s' "${ip:-$T_UNKNOWN}"
+}
+
+#===============================================================================
+# 8. 采集层 — TCP / UDP / 协议栈
+#===============================================================================
+tcp_scan() {
+    cat "$PROC_ROOT/net/tcp" "$PROC_ROOT/net/tcp6" 2>/dev/null | awk '
+    function h2d(h,   i, c, v, s) {
+        s = "0123456789ABCDEF"; v = 0; h = toupper(h)
+        for (i = 1; i <= length(h); i++) {
+            c = index(s, substr(h, i, 1)) - 1
+            if (c < 0) return -1
+            v = v * 16 + c
+        }
+        return v
+    }
+    function ip4(h,   a, b, c, d) {
+        if (length(h) != 8) return "?"
+        a = h2d(substr(h, 7, 2)); b = h2d(substr(h, 5, 2))
+        c = h2d(substr(h, 3, 2)); d = h2d(substr(h, 1, 2))
+        return a "." b "." c "." d
+    }
+    /^[[:space:]]*sl[[:space:]]/ { next }
+    NF < 4 { next }
+    {
+        total++
+        st = toupper($4)
+        c[st]++
+        la = $2; ra = $3
+        i = index(la, ":")
+        lah = substr(la, 1, i - 1)
+        lap = substr(la, i + 1)
+        j = index(ra, ":")
+        rah = substr(ra, 1, j - 1)
+        if (st == "01" && length(rah) == 8) peers[ip4(rah)]++
+        if (st == "0A" && length(lah) == 8) ports[h2d(lap)]++
+    }
+    END {
+        printf "STAT %d %d %d %d %d %d %d %d %d %d %d\n",
+            total+0, c["01"]+0, c["02"]+0, c["03"]+0, c["04"]+0, c["05"]+0,
+            c["06"]+0, c["08"]+0, c["09"]+0, c["0A"]+0, c["0B"]+0
+        np = 0; for (k in peers) np++
+        for (r = 1; r <= 5 && r <= np; r++) {
+            bk = ""; bv = -1
+            for (k in peers) if (!(k in usedp) && peers[k] > bv) { bv = peers[k]; bk = k }
+            if (bk == "") break
+            usedp[bk] = 1
+            printf "PEER %d %s\n", bv, bk
+        }
+        nq = 0; for (k in ports) nq++
+        for (r = 1; r <= 8 && r <= nq; r++) {
+            bk = ""; bv = -1
+            for (k in ports) if (!(k in usedq) && ports[k] > bv) { bv = ports[k]; bk = k }
+            if (bk == "") break
+            usedq[bk] = 1
+            printf "PORT %d %s\n", bv, bk
+        }
+    }'
+}
+
+udp_count() {
+    cat "$PROC_ROOT/net/udp" "$PROC_ROOT/net/udp6" 2>/dev/null | awk '
+    /^[[:space:]]*sl[[:space:]]/ { next }
+    { n++ }
+    END { print n+0 }'
+}
+
+read_snmp() {
+    [ -r "$PROC_ROOT/net/snmp" ] || { printf '0 0 0 0 0 0 0'; return; }
+    awk '
+    /^Tcp:/ { tn++; if (tn == 1) { for (i = 2; i <= NF; i++) H[$i] = i } else { for (i = 2; i <= NF; i++) V[i] = $i }; next }
+    /^Udp:/ { un++; if (un == 1) { for (i = 2; i <= NF; i++) UH[$i] = i } else { for (i = 2; i <= NF; i++) UV[i] = $i }; next }
+    END {
+        printf "%d %d %d %d %d %d %d\n",
+            V[H["InSegs"]]+0, V[H["OutSegs"]]+0, V[H["RetransSegs"]]+0, V[H["InErrs"]]+0,
+            UV[UH["InErrors"]]+0, UV[UH["RcvbufErrors"]]+0, UV[UH["InDatagrams"]]+0
+    }' "$PROC_ROOT/net/snmp" 2>/dev/null
+}
+
+read_netstat_ext() {
+    [ -r "$PROC_ROOT/net/netstat" ] || { printf '0 0 0 0 0'; return; }
+    awk '
+    /^TcpExt:/ {
+        n++
+        if (n == 1) { for (i = 2; i <= NF; i++) H[$i] = i }
+        else        { for (i = 2; i <= NF; i++) V[i] = $i }
+        next
+    }
+    END {
+        printf "%d %d %d %d %d\n",
+            V[H["ListenOverflows"]]+0, V[H["ListenDrops"]]+0, V[H["TCPSynRetrans"]]+0,
+            V[H["TCPTimeWaitOverflow"]]+0, V[H["SyncookiesSent"]]+0
+    }' "$PROC_ROOT/net/netstat" 2>/dev/null
+}
+
+read_conntrack() {
+    local c m
+    c=$(cat "$PROC_ROOT/sys/net/netfilter/nf_conntrack_count" 2>/dev/null)
+    m=$(cat "$PROC_ROOT/sys/net/netfilter/nf_conntrack_max" 2>/dev/null)
+    is_num "${c:-}" || c=0
+    is_num "${m:-}" || m=0
+    printf '%s %s' "$c" "$m"
+}
+
+port_map() {
+    [ "$HAS_READLINK" = "1" ] || return 0
+    local list p tgt ino pid name
+    list=$(cat "$PROC_ROOT/net/tcp" "$PROC_ROOT/net/tcp6" 2>/dev/null | awk '
+    function h2d(h,   i, c, v, s) {
+        s = "0123456789ABCDEF"; v = 0; h = toupper(h)
+        for (i = 1; i <= length(h); i++) { c = index(s, substr(h, i, 1)) - 1; if (c < 0) return -1; v = v * 16 + c }
+        return v
+    }
+    /^[[:space:]]*sl[[:space:]]/ { next }
+    $4 == "0A" {
+        la = $2; i = index(la, ":"); h = substr(la, 1, i - 1); p = substr(la, i + 1)
+        if (length(h) == 8) printf "%s %d\n", $10, h2d(p)
+    }')
+    [ -z "$list" ] && return 0
+
+    local pairs=""
+    for p in "$PROC_ROOT"/[0-9]*/fd/*; do
+        [ -e "$p" ] || continue
+        tgt=$(readlink "$p" 2>/dev/null) || continue
+        case "$tgt" in
+            'socket:['*\]) ino=${tgt#socket:[}; ino=${ino%]} ;;
+            *) continue ;;
+        esac
+        pid=${p#"$PROC_ROOT"/}
+        pid=${pid%%/*}
+        name=$(cat "$PROC_ROOT/$pid/comm" 2>/dev/null)
+        pairs="${pairs}${ino} ${pid} ${name:-?}
+"
+    done
+
+    printf '%s\n' "$list" | while read -r ino port; do
+        printf '%s' "$pairs" | awk -v i="$ino" -v p="$port" '$1 == i { printf "%s %s\n", p, $3; exit }'
+    done
+}
+
+#===============================================================================
+# 9. 采集层 — 进程 / 系统
+#===============================================================================
+proc_snapshot_line() {
+    awk '
+    {
+        o = index($0, "(")
+        if (o < 2) next
+        p = 0
+        for (i = length($0); i > o; i--) if (substr($0, i, 1) == ")") { p = i; break }
+        if (p == 0) next
+        pid  = substr($0, 1, o - 2)
+        comm = substr($0, o + 1, p - o - 1)
+        rest = substr($0, p + 2)
+        n = split(rest, f, " ")
+        if (n < 22) next
+        if (comm == "") comm = "-"
+        printf "%s|%s|%s|%s|%s|%s|%s|%s|%s\n", pid, f[1], f[18], f[22], f[21], f[12], f[13], f[20], comm
+    }'
+}
+
+proc_top() {
+    local sortkey="$1" dt="$2" prev="$TMPD/procs.prev" cur="$TMPD/procs.cur" n="${3:-8}"
+    cat "$PROC_ROOT"/[0-9]*/stat 2>/dev/null | proc_snapshot_line > "$cur" 2>/dev/null
+    if [ ! -s "$cur" ]; then
+        printf '0|0|0|?|0|-\n'
+        return 0
+    fi
+    if [ ! -s "$prev" ]; then
+        cp "$cur" "$prev" 2>/dev/null
+        printf '0|0|0|?|0|(采样中)\n'
+        return 0
+    fi
+    awk -v dt="$dt" -v ctk="$CLK_TCK" -v pg="$PAGESIZE" -v mt="$CV_MEM_TOTAL" -v key="$sortkey" -v N="$n" '
+    BEGIN { FS = "|" }
+    NR == FNR { pp[$1] = $8; pu[$1] = $6; ps[$1] = $7; next }
+    {
+        pid = $1
+        fresh = (!(pid in pp)) || (pp[pid] != $8)
+        du = fresh ? 0 : ($6 - pu[pid])
+        ds = fresh ? 0 : ($7 - ps[pid])
+        cpuv = (dt > 0) ? (du + ds) / ctk / dt * 100 : 0
+        if (cpuv < 0) cpuv = 0
+        m = $4 * pg
+        memv = (mt > 0) ? m / mt * 100 : 0
+        cc = $9
+        arr[pid] = sprintf("%.1f|%.1f|%s|%s|%s|%s", cpuv, memv, pid, $2, $3, cc)
+        if (key == "m") sc[pid] = memv; else sc[pid] = cpuv
+        cnt++
+    }
+    END {
+        for (r = 1; r <= N && r <= cnt; r++) {
+            bk = ""; bv = -1
+            for (k in sc) if (!(k in used) && sc[k] > bv) { bv = sc[k]; bk = k }
+            if (bk == "") break
+            used[bk] = 1
+            print arr[bk]
+        }
+    }' "$prev" "$cur" 2>/dev/null
+    mv -f "$cur" "$prev" 2>/dev/null
+    return 0
+}
+
+read_temp() {
+    local f t out=""
+    for f in "$SYS_ROOT"/class/thermal/thermal_zone*/temp; do
+        [ -r "$f" ] || continue
+        t=$(cat "$f" 2>/dev/null)
+        is_num "$t" || continue
+        [ "$t" -gt 1000 ] || continue
+        out=$(( t / 1000 ))
+        break
+    done
+    if [ -z "$out" ]; then
+        for f in "$SYS_ROOT"/class/hwmon/hwmon*/temp1_input; do
+            [ -r "$f" ] || continue
+            t=$(cat "$f" 2>/dev/null)
+            is_num "$t" || continue
+            [ "$t" -gt 1000 ] || continue
+            out=$(( t / 1000 ))
+            break
+        done
+    fi
+    printf '%s' "$out"
+}
+
+read_os() {
+    local n=""
+    if [ -r "$ETC_ROOT/os-release" ]; then
+        n=$(awk -F= '/^PRETTY_NAME=/{v=$2; gsub(/"/, "", v); print v; exit}' "$ETC_ROOT/os-release" 2>/dev/null)
+    fi
+    [ -z "$n" ] && n=$(uname -s 2>/dev/null)
+    printf '%s' "${n:-Linux}"
+}
+
+count_zombie() {
+    awk '
+    {
+        o = index($0, "(")
+        if (o < 2) next
+        p = 0
+        for (i = length($0); i > o; i--) if (substr($0, i, 1) == ")") { p = i; break }
+        if (p == 0) next
+        rest = substr($0, p + 2)
+        n = split(rest, f, " ")
+        if (n >= 1 && f[1] == "Z") z++
+    }
+    END { print z+0 }' "$PROC_ROOT"/[0-9]*/stat 2>/dev/null
+}
+
+count_users() {
+    local n=0
+    if [ "$PROC_ROOT" = "/proc" ] && command -v who >/dev/null 2>&1; then
+        n=$(who 2>/dev/null | awk 'END{print NR+0}')
+    fi
+    is_num "$n" || n=0
+    printf '%s' "$n"
+}
+
+#===============================================================================
+# 4b. 免 fork 格式化 (printf -v 直接写变量, 每帧可省数十次子 shell)
+#===============================================================================
+hb_to() {
+    local n="${2:-0}" neg="" r
+    case "$n" in -*) neg="-"; n=${n#-} ;; esac
+    is_num "$n" || n=0
+    if   [ "$n" -ge 1099511627776 ]; then r=$(( n % 1099511627776 )); n=$(( n / 1099511627776 )); r=$(( r * 10 / 1099511627776 )); printf -v "$1" '%s%d.%dTB' "$neg" "$n" "$r"
+    elif [ "$n" -ge 1073741824 ];    then r=$(( n % 1073741824 ));    n=$(( n / 1073741824 ));    r=$(( r * 10 / 1073741824 ));    printf -v "$1" '%s%d.%dGB' "$neg" "$n" "$r"
+    elif [ "$n" -ge 1048576 ];       then r=$(( n % 1048576 ));       n=$(( n / 1048576 ));       r=$(( r * 10 / 1048576 ));       printf -v "$1" '%s%d.%dMB' "$neg" "$n" "$r"
+    elif [ "$n" -ge 1024 ];          then r=$(( n % 1024 ));          n=$(( n / 1024 ));          r=$(( r * 10 / 1024 ));          printf -v "$1" '%s%d.%dKB' "$neg" "$n" "$r"
+    else printf -v "$1" '%s%dB' "$neg" "$n"
+    fi
+}
+
+hbr_to() { hb_to "$1" "${2:-0}"; printf -v "$1" '%s/s' "${!1}"; }
+
+hr_to() {
+    local w="${2:-60}" i=0 out="" ch="-"
+    [ "$USE_ASCII" = "1" ] || ch="─"
+    [ "$w" -lt 1 ] && w=1
+    while [ "$i" -lt "$w" ]; do out="${out}${ch}"; i=$(( i + 1 )); done
+    printf -v "$1" '%s' "$out"
+}
+
+bar_to() {
+    local pct="${2:-0}" width="${3:-20}" filled i out=""
+    is_num "${pct%%.*}" || pct=0
+    pct=${pct%%.*}
+    [ "$width" -lt 1 ] && width=1
+    filled=$(( pct * width / 100 ))
+    [ "$filled" -gt "$width" ] && filled=$width
+    [ "$filled" -lt 0 ] && filled=0
+    i=0
+    if [ "$USE_ASCII" = "1" ]; then
+        while [ "$i" -lt "$filled" ]; do out="${out}#"; i=$(( i + 1 )); done
+        while [ "$i" -lt "$width" ]; do out="${out}-"; i=$(( i + 1 )); done
+    else
+        while [ "$i" -lt "$filled" ]; do out="${out}█"; i=$(( i + 1 )); done
+        while [ "$i" -lt "$width" ]; do out="${out}░"; i=$(( i + 1 )); done
+    fi
+    printf -v "$1" '%s' "$out"
+}
+
+pc_to() {
+    local p="${2:-0}"
+    is_num "${p%%.*}" || p=0
+    p=${p%%.*}
+    if [ "$p" -ge 85 ]; then printf -v "$1" '%s' "$C_RED"
+    elif [ "$p" -ge 60 ]; then printf -v "$1" '%s' "$C_YELLOW"
+    else printf -v "$1" '%s' "$C_GREEN"; fi
+}
+
+#===============================================================================
+# 10. 路径 / 状态文件
+#===============================================================================
+init_paths() {
+    local base
+    if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
+        base="/var/lib/htop-s"
+        STATE_FILE="$base/state"
+        CONF_FILE="/etc/htop-s/config"
+        CONFIG_DIR="/etc/htop-s"
+        LOG_DIR="/var/log/htop-s"
+        PID_FILE="/var/run/htop-s.pid"
+        LOCK_FILE="/var/run/htop-s.lock"
+    else
+        base="${XDG_STATE_HOME:-$HOME/.local/state}/htop-s"
+        STATE_FILE="$base/state"
+        CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/htop-s"
+        CONF_FILE="$CONFIG_DIR/config"
+        LOG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/htop-s/log"
+        PID_FILE="${XDG_RUNTIME_DIR:-/tmp}/htop-s-$UID.pid"
+        LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/htop-s-$UID.lock"
+    fi
+    ALERT_FILE="$LOG_DIR/alert-$(date +%Y-%m-%d).log"
+    TMPD="${TMPDIR:-/tmp}/${PROG}-$$"
+    mkdir -p "$TMPD" 2>/dev/null
+}
+
+load_config() {
+    [ -f "$CONF_FILE" ] || return 0
+    local k v qv
+    while IFS='=' read -r k v; do
+        case "$k" in
+            ''|\#*) continue ;;
+            iface)      IFACE_LIST=$(printf '%s' "$v" | tr ',' ' ') ;;
+            interval)   is_num "$v" && [ "$v" -ge 1 ] && [ "$v" -le 30 ] && INTERVAL=$v ;;
+            quota)
+                qv=$(parse_size "$v" 2>/dev/null)
+                is_num "${qv:-}" && ST_QUOTA=$qv
+                ;;
+            reset_day)  is_num "$v" && ST_RESET_DAY=$v ;;
+            keep_days)  is_num "$v" && KEEP_DAYS=$v ;;
+            acct)       ST_MODE=$v ;;
+            proxy)      [ -z "$CLI_PROXY" ] && HT_S_PROXY=$v ;;
+            notify_cmd) NOTIFY_CMD=$v ;;
+            lang)       [ "$v" = "en" ] && OUT_LANG=en ;;
+        esac
+    done < "$CONF_FILE"
+
+    # 优先级: 命令行 > 配置文件 > 状态文件 > 内置默认
+    if [ -n "$CLI_IFACE" ]; then
+        IFACE_LIST=$(printf '%s' "$CLI_IFACE" | tr ',' ' ')
+    fi
+    if [ -n "$CLI_QUOTA" ]; then
+        qv=$(parse_size "$CLI_QUOTA" 2>/dev/null)
+        is_num "${qv:-}" && ST_QUOTA=$qv
+    fi
+    [ -n "$CLI_RESET_DAY" ] && ST_RESET_DAY=$CLI_RESET_DAY
+    [ -n "$CLI_KEEP" ] && KEEP_DAYS=$CLI_KEEP
+    [ -n "$CLI_INTERVAL" ] && INTERVAL=$CLI_INTERVAL
+
+    # 规范化
+    is_num "${KEEP_DAYS:-}" || KEEP_DAYS=30
+    [ "$KEEP_DAYS" -lt 1 ] && KEEP_DAYS=1
+    is_num "${ST_RESET_DAY:-}" || ST_RESET_DAY=1
+    [ "$ST_RESET_DAY" -lt 1 ] && ST_RESET_DAY=1
+    [ "$ST_RESET_DAY" -gt 28 ] && ST_RESET_DAY=28
+    case "${ST_QUOTA:-0}" in ''|*[!0-9]*) ST_QUOTA=0 ;; esac
+    case "${ST_MODE:-proc}" in nft|proc) ;; *) ST_MODE=proc ;; esac
+    return 0
+}
+
+state_load() {
+    [ -f "$STATE_FILE" ] || return 0
+    local k v
+    while IFS='=' read -r k v; do
+        case "$k" in
+            ''|\#*) continue ;;
+            mode) ST_MODE=$v ;;
+            period_start) ST_PERIOD_START=$v ;;
+            reset_day) ST_RESET_DAY=$v ;;
+            quota) ST_QUOTA=$v ;;
+            nft_rx_done) ST_NFT_RX_DONE=$v ;;
+            nft_tx_done) ST_NFT_TX_DONE=$v ;;
+            nft_rx_last) ST_NFT_RX_LAST=$v ;;
+            nft_tx_last) ST_NFT_TX_LAST=$v ;;
+            proc_rx_base) ST_PROC_RX_BASE=$v ;;
+            proc_tx_base) ST_PROC_TX_BASE=$v ;;
+            proc_rx_last) ST_PROC_RX_LAST=$v ;;
+            proc_tx_last) ST_PROC_TX_LAST=$v ;;
+            uptime_last) ST_UPTIME_LAST=$v ;;
+            ts_last) ST_TS_LAST=$v ;;
+            alert_state) ALERT_STATE_LINE=$v ;;
+            notify_cmd) NOTIFY_CMD=$v ;;
+        esac
+    done < "$STATE_FILE"
+
+    is_num "${ST_RESET_DAY:-}" || ST_RESET_DAY=1
+    [ "$ST_RESET_DAY" -lt 1 ] && ST_RESET_DAY=1
+    [ "$ST_RESET_DAY" -gt 28 ] && ST_RESET_DAY=28
+    case "${ST_QUOTA:-0}" in ''|*[!0-9]*) ST_QUOTA=0 ;; esac
+    for k in ST_NFT_RX_DONE ST_NFT_TX_DONE ST_NFT_RX_LAST ST_NFT_TX_LAST; do
+        eval "case \"\${$k:-}\" in ''|*[!0-9]*) $k=0 ;; esac"
+    done
+    for k in ST_PROC_RX_BASE ST_PROC_TX_BASE ST_PROC_RX_LAST ST_PROC_TX_LAST ST_TS_LAST; do
+        eval "case \"\${$k:-}\" in ''|*[!0-9]*) $k=0 ;; esac"
+    done
+    is_num "${ST_UPTIME_LAST%%.*}" || ST_UPTIME_LAST=0
+}
+
+state_save() {
+    local dir tmp
+    dir=${STATE_FILE%/*}
+    mkdir -p "$dir" 2>/dev/null
+    tmp="$STATE_FILE.tmp.$$"
+    {
+        printf 'version=1\n'
+        printf 'mode=%s\n' "$ST_MODE"
+        printf 'period_start=%s\n' "$ST_PERIOD_START"
+        printf 'reset_day=%s\n' "$ST_RESET_DAY"
+        printf 'quota=%s\n' "$ST_QUOTA"
+        printf 'nft_rx_done=%s\n' "$ST_NFT_RX_DONE"
+        printf 'nft_tx_done=%s\n' "$ST_NFT_TX_DONE"
+        printf 'nft_rx_last=%s\n' "$ST_NFT_RX_LAST"
+        printf 'nft_tx_last=%s\n' "$ST_NFT_TX_LAST"
+        printf 'proc_rx_base=%s\n' "$ST_PROC_RX_BASE"
+        printf 'proc_tx_base=%s\n' "$ST_PROC_TX_BASE"
+        printf 'proc_rx_last=%s\n' "$ST_PROC_RX_LAST"
+        printf 'proc_tx_last=%s\n' "$ST_PROC_TX_LAST"
+        printf 'uptime_last=%s\n' "$ST_UPTIME_LAST"
+        printf 'ts_last=%s\n' "$ST_TS_LAST"
+        printf 'alert_state=%s\n' "$ALERT_STATE_LINE"
+        printf 'notify_cmd=%s\n' "$NOTIFY_CMD"
+    } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+    return 0
+}
+
+#===============================================================================
+# 11. 日期算术 (纯 shell, 不依赖 date -d)
+#===============================================================================
+d2n() {
+    local y=$1 m=$2 d=$3 a y2 m2
+    a=$(( (14 - m) / 12 ))
+    y2=$(( y + 4800 - a ))
+    m2=$(( m + 12 * a - 3 ))
+    printf '%s' $(( d + (153 * m2 + 2) / 5 + 365 * y2 + y2 / 4 - y2 / 100 + y2 / 400 - 32045 ))
+}
+
+days_in_month() {
+    local y=$1 m=$2
+    case "$m" in
+        1|3|5|7|8|10|12) printf '31' ;;
+        4|6|9|11) printf '30' ;;
+        2)
+            if [ $(( y % 4 )) -eq 0 ] && { [ $(( y % 100 )) -ne 0 ] || [ $(( y % 400 )) -eq 0 ]; }
+            then printf '29'; else printf '28'; fi ;;
+        *) printf '30' ;;
+    esac
+}
+
+split_date() {
+    # 输入 YYYY-MM-DD, 输出 "y m d"
+    local s="$1" y m d
+    y=${s%%-*}
+    m=${s#*-}
+    d=${m#*-}
+    m=${m%%-*}
+    printf '%s %s %s' "$(( 10#$y ))" "$(( 10#$m ))" "$(( 10#$d ))"
+}
+
+period_start() {
+    local rd="${1:-1}" ty tm td dim
+    ty=$(date +%Y); tm=$(date +%m); td=$(date +%d)
+    tm=$(( 10#$tm )); td=$(( 10#$td ))
+    if [ "$td" -lt "$rd" ]; then
+        tm=$(( tm - 1 ))
+        if [ "$tm" -lt 1 ]; then tm=12; ty=$(( ty - 1 )); fi
+    fi
+    dim=$(days_in_month "$ty" "$tm")
+    [ "$rd" -gt "$dim" ] && rd=$dim
+    [ "$rd" -lt 1 ] && rd=1
+    printf '%04d-%02d-%02d' "$ty" "$tm" "$rd"
+}
+
+days_elapsed() {
+    local s="$1" sy sm sd ty tm td n
+    sy=${s%%-*}
+    sm=${s#*-}
+    sd=${sm#*-}
+    sm=${sm%%-*}
+    sy=$(( 10#$sy )); sm=$(( 10#$sm )); sd=$(( 10#$sd ))
+    ty=$(date +%Y); tm=$(date +%m); td=$(date +%d)
+    tm=$(( 10#$tm )); td=$(( 10#$td ))
+    n=$(( $(d2n "$ty" "$tm" "$td") - $(d2n "$sy" "$sm" "$sd") ))
+    [ "$n" -lt 0 ] && n=0
+    printf '%s' "$n"
+}
+
+#===============================================================================
+# 12. nftables 计数 (只新建独立表, 绝不修改用户已有规则)
+#===============================================================================
+nft_exists() {
+    [ "$HAS_NFT" = "1" ] || return 1
+    nft list table inet htop_s >/dev/null 2>&1
+}
+
+nft_read() {
+    [ "$HAS_NFT" = "1" ] || { printf '0 0'; return; }
+    nft list table inet htop_s 2>/dev/null | awk '
+    /chain[[:space:]]+in_acct/  { c = "in";  next }
+    /chain[[:space:]]+out_acct/ { c = "out"; next }
+    /counter/ {
+        for (i = 1; i <= NF; i++) {
+            if ($i == "bytes") {
+                if (c == "in") inb += $(i+1) + 0
+                else if (c == "out") outb += $(i+1) + 0
+            }
+        }
+    }
+    END { printf "%d %d", inb+0, outb+0 }'
+}
+
+nft_delete() {
+    [ "$HAS_NFT" = "1" ] || return 0
+    nft delete table inet htop_s 2>/dev/null
+    return 0
+}
+
+nft_create() {
+    [ "$HAS_NFT" = "1" ] || return 1
+    local i
+    nft list table inet htop_s >/dev/null 2>&1 && nft delete table inet htop_s 2>/dev/null
+    nft add table inet htop_s 2>/dev/null || return 1
+    nft add chain inet htop_s in_acct '{ type filter hook prerouting priority 0; policy accept; }' 2>/dev/null || { nft_delete; return 1; }
+    nft add chain inet htop_s out_acct '{ type filter hook postrouting priority 0; policy accept; }' 2>/dev/null || { nft_delete; return 1; }
+    for i in $IFACE_LIST; do
+        nft add rule inet htop_s in_acct iifname "$i" counter 2>/dev/null
+        nft add rule inet htop_s out_acct oifname "$i" counter 2>/dev/null
+    done
+    return 0
+}
+
+#===============================================================================
+# 13. 流量配额
+#===============================================================================
+quota_update() {
+    local rx_now=0 tx_now=0 up_now ps
+
+    if [ "$ST_MODE" = "nft" ] && [ "$HAS_NFT" = "1" ] && nft_exists; then
+        read -r rx_now tx_now <<< "$(nft_read)"
+    else
+        read -r rx_now tx_now _ _ _ _ <<< "$(net_read)"
+    fi
+    case "${rx_now:-}" in ''|*[!0-9]*) rx_now=0 ;; esac
+    case "${tx_now:-}" in ''|*[!0-9]*) tx_now=0 ;; esac
+    up_now=$(read_uptime)
+    is_num "${up_now%%.*}" || up_now=0
+
+    local rebooted=0
+    if is_num "${ST_UPTIME_LAST%%.*}" && [ "${ST_UPTIME_LAST%%.*}" -gt 0 ] 2>/dev/null; then
+        if [ "${up_now%%.*}" -lt "${ST_UPTIME_LAST%%.*}" ]; then rebooted=1; fi
+    fi
+
+    if [ "$ST_MODE" = "nft" ] && [ "$HAS_NFT" = "1" ] && nft_exists; then
+        if [ "$rebooted" = "1" ]; then
+            ST_NFT_RX_DONE=$(( ST_NFT_RX_DONE + ST_NFT_RX_LAST ))
+            ST_NFT_TX_DONE=$(( ST_NFT_TX_DONE + ST_NFT_TX_LAST ))
+            rx_now=0; tx_now=0
+        fi
+        ST_NFT_RX_LAST=$rx_now
+        ST_NFT_TX_LAST=$tx_now
+        CV_PERIOD_RX=$(( ST_NFT_RX_DONE + rx_now ))
+        CV_PERIOD_TX=$(( ST_NFT_TX_DONE + tx_now ))
+        CV_INCOMPLETE=0
+    else
+        if [ "$rebooted" = "1" ]; then
+            CV_INCOMPLETE=1
+            ST_PROC_RX_BASE=$rx_now
+            ST_PROC_TX_BASE=$tx_now
+        fi
+        if [ "$rx_now" -lt "$ST_PROC_RX_BASE" ] 2>/dev/null; then ST_PROC_RX_BASE=$rx_now; CV_INCOMPLETE=1; fi
+        if [ "$tx_now" -lt "$ST_PROC_TX_BASE" ] 2>/dev/null; then ST_PROC_TX_BASE=$tx_now; CV_INCOMPLETE=1; fi
+        ST_PROC_RX_LAST=$rx_now
+        ST_PROC_TX_LAST=$tx_now
+        CV_PERIOD_RX=$(( rx_now - ST_PROC_RX_BASE ))
+        CV_PERIOD_TX=$(( tx_now - ST_PROC_TX_BASE ))
+        [ "$CV_PERIOD_RX" -lt 0 ] && CV_PERIOD_RX=0
+        [ "$CV_PERIOD_TX" -lt 0 ] && CV_PERIOD_TX=0
+    fi
+
+    ps=$(period_start "$ST_RESET_DAY")
+    if [ -z "$ST_PERIOD_START" ]; then
+        ST_PERIOD_START="$ps"
+    else
+        local n_ps n_old
+        n_ps=$(d2n $(split_date "$ps"))
+        n_old=$(d2n $(split_date "$ST_PERIOD_START"))
+        if [ "$n_ps" -gt "$n_old" ]; then
+            mkdir -p "${STATE_FILE%/*}" 2>/dev/null
+            printf '%s,%s,%s\n' "$ST_PERIOD_START" "$CV_PERIOD_RX" "$CV_PERIOD_TX" >> "${STATE_FILE%/*}/history" 2>/dev/null
+            if [ "$ST_MODE" = "nft" ] && [ "$HAS_NFT" = "1" ] && nft_exists; then
+                ST_NFT_RX_DONE=$rx_now; ST_NFT_TX_DONE=$tx_now
+            else
+                ST_PROC_RX_BASE=$rx_now; ST_PROC_TX_BASE=$tx_now
+            fi
+            ST_PERIOD_START="$ps"
+            CV_PERIOD_RX=0; CV_PERIOD_TX=0
+        fi
+    fi
+
+    ST_UPTIME_LAST=$up_now
+    ST_TS_LAST=$(date +%s 2>/dev/null || echo 0)
+
+    local used de dim
+    used=$(( CV_PERIOD_RX + CV_PERIOD_TX ))
+    if [ "${ST_QUOTA:-0}" -gt 0 ] 2>/dev/null; then
+        CV_QUOTA_PCT=$(( used * 100 / ST_QUOTA ))
+        de=$(days_elapsed "$ST_PERIOD_START")
+        dim=$(days_in_month "$(date +%Y)" "$(( 10#$(date +%m) ))")
+        if [ "$de" -ge 1 ] 2>/dev/null; then
+            CV_QUOTA_ETA=$(( used * dim / de ))
+        else
+            CV_QUOTA_ETA=0
+        fi
+    else
+        CV_QUOTA_PCT=0; CV_QUOTA_ETA=0
+    fi
+    return 0
+}
+
+#===============================================================================
+# 14. 告警引擎
+#
+# 性能约束: alert_scan 每轮采样都会执行, 必须避免逐规则 fork。
+#   - 状态读写用纯 shell 字符串操作 (0 fork)
+#   - 18 条规则的阈值比较由一次 awk 统一算出 (1 fork)
+# 优化前每轮约 234 次 fork, 优化后约 8 次。
+#===============================================================================
+alert_emit() {
+    local lvl="$1" rule="$2" val="$3" th="$4" desc="$5"
+    local ts line
+    ts=$(date '+%Y-%m-%d %H:%M:%S')
+    line="$ts [$lvl] [$rule] $desc (当前值 $val, 阈值 $th)"
+    mkdir -p "$LOG_DIR" 2>/dev/null
+    printf '%s\n' "$line" >> "$ALERT_FILE" 2>/dev/null
+    if [ -n "$NOTIFY_CMD" ]; then
+        printf '%s' "$line" | eval "$NOTIFY_CMD" >/dev/null 2>&1
+    fi
+    return 0
+}
+
+# 告警状态以空格分隔的 "k=v" 串保存在 ALERT_STATE_LINE
+alert_get() {
+    local item
+    for item in ${ALERT_STATE_LINE:-}; do
+        case "$item" in
+            "$1="*) printf '%s' "${item#*=}"; return 0 ;;
+        esac
+    done
+    printf ''
+}
+
+alert_set() {
+    local k="$1" v="$2" item out=""
+    for item in ${ALERT_STATE_LINE:-}; do
+        case "$item" in
+            "$k="*) continue ;;
+        esac
+        out="${out}${out:+ }${item}"
+    done
+    ALERT_STATE_LINE="${out}${out:+ }${k}=${v}"
+}
+
+# $1=规则 $2=当前值 $3=阈值 $4=级别 $5=连续次数 $6=描述 $7=命中标志(0/1)
+alert_eval() {
+    local rule="$1" val="$2" th="$3" lvl="$4" need="$5" desc="$6" hit="${7:-0}"
+    local key="A_${rule}_" cnt st last now
+    cnt=$(alert_get "${key}cnt"); is_num "${cnt:-}" || cnt=0
+    st=$(alert_get "${key}st");  [ -z "${st:-}" ] && st=ok
+    last=$(alert_get "${key}last"); is_num "${last:-}" || last=0
+
+    if [ "$hit" = "1" ]; then
+        cnt=$(( cnt + 1 ))
+        if [ "$st" != "firing" ] && [ "$cnt" -ge "$need" ]; then
+            st="firing"
+            now=$(date +%s 2>/dev/null || echo 0)
+            alert_emit "$lvl" "$rule" "$val" "$th" "$desc"
+            last=$now
+        elif [ "$st" = "firing" ]; then
+            now=$(date +%s 2>/dev/null || echo 0)
+            if [ $(( now - last )) -ge 600 ]; then
+                alert_emit "$lvl" "$rule" "$val" "$th" "$desc"
+                last=$now
+            fi
+        fi
+    else
+        if [ "$st" = "firing" ]; then
+            alert_emit "INFO" "$rule" "$val" "$th" "已恢复"
+        fi
+        st="ok"; cnt=0
+    fi
+    alert_set "${key}cnt" "$cnt"
+    alert_set "${key}st" "$st"
+    alert_set "${key}last" "$last"
+}
+
+alert_scan() {
+    local mempct=0 swappct=0 dmax=0 imax=0 ctpct=0 dn=0 loadn=0 flags=0
+    local f_cpu f_mem f_swap f_disk f_inode f_load f_syn f_tw f_cw
+    local f_lovf f_rt f_sret f_ct f_nic f_udpe f_oom f_dst f_q80 f_q100
+
+    mempct=$(awk -v u="$CV_MEM_USED" -v t="$CV_MEM_TOTAL" 'BEGIN{ printf "%.1f", (t>0)?u/t*100:0 }')
+    if [ "${CV_SWAP_TOTAL:-0}" -gt 0 ] 2>/dev/null; then
+        swappct=$(awk -v u="$CV_SWAP_USED" -v t="$CV_SWAP_TOTAL" 'BEGIN{ printf "%.1f", (t>0)?u/t*100:0 }')
+    fi
+    dmax=$(printf '%s\n' "$SV_DISK" | awk 'NF { p = $1 + 0; if (p > m) m = p } END { print m+0 }')
+    imax=$(printf '%s' "${SV_INODE:-0|}" | awk -F'|' '{ print $1 + 0 }')
+    if [ "${MV_CONNTRACK_MAX:-0}" -gt 0 ] 2>/dev/null; then
+        ctpct=$(awk -v c="$MV_CONNTRACK" -v m="$MV_CONNTRACK_MAX" 'BEGIN{ printf "%.0f", c/m*100 }')
+    fi
+    dn=$(printf '%s\n' "$MV_PROCS" | awk -F'|' '$4 == "D" { n++ } END { print n+0 }')
+    loadn=$(awk -v l="$CV_LOAD1" -v c="$SV_CORES_N" 'BEGIN{ printf "%.2f", (c>0)?l/c:0 }')
+
+    is_num "${dmax:-}" || dmax=0
+    is_num "${imax:-}" || imax=0
+    is_num "${dn:-}" || dn=0
+    is_num "${mempct%%.*}" || mempct=0
+    is_num "${swappct%%.*}" || swappct=0
+
+    # 一次 awk 算出全部 19 个命中标志
+    flags=$(awk \
+        -v cpu="$CV_CPU_TOTAL" -v mem="$mempct" -v swp="$swappct" -v pgout="$CV_PG_OUT" \
+        -v dsk="$dmax" -v ino="$imax" -v ld="$loadn" \
+        -v syn="$CV_TCP_SYN" -v tw="$CV_TCP_TW" -v cw="$CV_TCP_CW" \
+        -v lovf="$MV_LIS_OVF" -v rt="$MV_RETRANS" -v sret="$MV_SYN_RET" \
+        -v ct="$ctpct" -v nic="$(( CV_RXERR + CV_TXERR + CV_RXDROP + CV_TXDROP ))" \
+        -v udpe="$(( MV_UDP_INERR + MV_UDP_RCVBUF ))" -v oom="$CV_OOM" \
+        -v dst="$dn" -v qp="$CV_QUOTA_PCT" '
+    function n(v) { return (v + 0) }
+    BEGIN {
+        printf "%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+            (n(cpu) >= 90),
+            (n(mem) >= 90),
+            ((n(swp) >= 50 && n(pgout) > 0) ? 1 : 0),
+            (n(dsk) >= 90),
+            (n(ino) >= 90),
+            (n(ld) >= 2.0),
+            (n(syn) >= 100),
+            (n(tw) >= 30000),
+            (n(cw) >= 500),
+            (n(lovf) >= 1),
+            (n(rt) >= 5),
+            (n(sret) >= 20),
+            (n(ct) >= 80),
+            (n(nic) >= 1),
+            (n(udpe) >= 1),
+            (n(oom) >= 1),
+            (n(dst) >= 1),
+            (n(qp) >= 80),
+            (n(qp) >= 100)
+    }' 2>/dev/null)
+
+    read -r f_cpu f_mem f_swap f_disk f_inode f_load f_syn f_tw f_cw \
+            f_lovf f_rt f_sret f_ct f_nic f_udpe f_oom f_dst f_q80 f_q100 <<< "$flags"
+
+    alert_eval cpu         "$CV_CPU_TOTAL"  90   CRIT 3 "CPU 使用率过高"                "${f_cpu:-0}"
+    alert_eval mem         "$mempct"        90   CRIT 3 "内存使用率过高"               "${f_mem:-0}"
+    alert_eval swap        "$swappct"       50   WARN 3 "Swap 使用率过高且有换页"      "${f_swap:-0}"
+    alert_eval disk        "$dmax"          90   CRIT 1 "磁盘使用率过高"               "${f_disk:-0}"
+    alert_eval inode       "$imax"          90   CRIT 1 "inode 使用率过高"             "${f_inode:-0}"
+    alert_eval load        "$loadn"         2.0  WARN 3 "系统负载过高 (按核数归一)"     "${f_load:-0}"
+    alert_eval syn         "$CV_TCP_SYN"    100  CRIT 1 "SYN_RECV 堆积, 疑似 SYN Flood" "${f_syn:-0}"
+    alert_eval timewait    "$CV_TCP_TW"     30000 WARN 1 "TIME_WAIT 数量过高"          "${f_tw:-0}"
+    alert_eval closewait   "$CV_TCP_CW"     500  WARN 3 "CLOSE_WAIT 堆积, 应用可能未关闭连接" "${f_cw:-0}"
+    alert_eval listen_drop "$MV_LIS_OVF"    1    WARN 3 "accept 队列溢出 ListenOverflows" "${f_lovf:-0}"
+    alert_eval retrans     "$MV_RETRANS"    5    WARN 3 "TCP 重传率过高"               "${f_rt:-0}"
+    alert_eval syn_retrans "$MV_SYN_RET"    20   WARN 3 "SYN 重传数过高"               "${f_sret:-0}"
+    alert_eval conntrack   "$ctpct"         80   CRIT 1 "conntrack 表接近上限"          "${f_ct:-0}"
+    alert_eval nic_err     "$(( CV_RXERR + CV_TXERR + CV_RXDROP + CV_TXDROP ))" 1 WARN 3 "网卡错误或丢包增长" "${f_nic:-0}"
+    alert_eval udp_err     "$(( MV_UDP_INERR + MV_UDP_RCVBUF ))" 1 WARN 3 "UDP 收包错误" "${f_udpe:-0}"
+    alert_eval oom         "$CV_OOM"        1    CRIT 1 "发生 OOM 事件"                "${f_oom:-0}"
+    alert_eval dstate      "$dn"            1    CRIT 5 "存在 D 状态进程 (IO 阻塞)"     "${f_dst:-0}"
+    if [ "${ST_QUOTA:-0}" -gt 0 ] 2>/dev/null; then
+        alert_eval quota80  "$CV_QUOTA_PCT" 80   WARN 1 "月流量已达配额 80%"            "${f_q80:-0}"
+        alert_eval quota100 "$CV_QUOTA_PCT" 100  CRIT 1 "月流量已超配额"                "${f_q100:-0}"
+    fi
+    return 0
+}
+
+#===============================================================================
+# 15. 采样
+#===============================================================================
+trim_hist() {
+    local s="$1" n="$2" cnt
+    cnt=$(printf '%s' "$s" | wc -w 2>/dev/null | tr -d ' ')
+    is_num "${cnt:-}" || cnt=0
+    if [ "$cnt" -le "$n" ]; then printf '%s' "$s"; return; fi
+    printf '%s' "$s" | awk -v n="$n" '{ for (i = NF - n + 1; i <= NF; i++) printf "%s%s", $i, (i < NF ? " " : "") }'
+}
+
+sample_prime() {
+    PREV_UPTIME=$(read_uptime)
+    is_num "${PREV_UPTIME%%.*}" || PREV_UPTIME=0
+    PREV_MID_UPTIME=$PREV_UPTIME
+    PREV_CPU=$(read_cpu)
+    PREV_CPU_CORES=$(read_cpu_cores)
+    read -r PREV_RX PREV_TX PREV_RXERR PREV_TXERR PREV_RXDROP PREV_TXDROP <<< "$(net_read)"
+    is_num "${PREV_RX:-}" || PREV_RX=0
+    is_num "${PREV_TX:-}" || PREV_TX=0
+    read -r PREV_SEG_IN PREV_SEG_OUT PREV_SEG_RET PREV_UDP_ERR PREV_UDP_BUF _ _ <<< "$(read_snmp)"
+    is_num "${PREV_SEG_OUT:-}" || PREV_SEG_OUT=0
+    is_num "${PREV_SEG_RET:-}" || PREV_SEG_RET=0
+    is_num "${PREV_UDP_ERR:-}" || PREV_UDP_ERR=0
+    is_num "${PREV_UDP_BUF:-}" || PREV_UDP_BUF=0
+    local a b c d e
+    read -r a b c d e <<< "$(read_diskstats "$DISK_WHOLE")"
+    PREV_DSK_RD=$a; PREV_DSK_WR=$b; PREV_DSK_RC=$c; PREV_DSK_WC=$d; PREV_DSK_IOT=$e
+    read -r a b c <<< "$(read_vmstat)"
+    PREV_PG_IN=$a; PREV_PG_OUT=$b
+    cat "$PROC_ROOT"/[0-9]*/stat 2>/dev/null | proc_snapshot_line > "$TMPD/procs.prev" 2>/dev/null
+}
+
+sample_fast() {
+    local now dt cur curc dt_num
+    now=$(read_uptime)
+    is_num "${now%%.*}" || now=0
+    if ! is_num "${PREV_UPTIME%%.*}"; then
+        PREV_UPTIME=$now
+        return 0
+    fi
+    dt=$(awk -v n="$now" -v p="$PREV_UPTIME" 'BEGIN { d = n - p; if (d <= 0) d = 0.001; printf "%.3f", d }')
+    dt_num=$dt
+
+    cur=$(read_cpu)
+    read -r CV_CPU_TOTAL CV_CPU_USER CV_CPU_SYS CV_CPU_IO CV_CPU_IRQ CV_CPU_SOFT CV_CPU_STEAL <<< "$(cpu_delta "$cur" "$PREV_CPU")"
+    PREV_CPU=$cur
+    is_num "${CV_CPU_TOTAL%%.*}" || CV_CPU_TOTAL=0
+
+    curc=$(read_cpu_cores)
+    CV_CORES=$(cpu_cores_delta "$curc" "$PREV_CPU_CORES")
+    PREV_CPU_CORES=$curc
+
+    read -r CV_MEM_TOTAL CV_MEM_USED CV_SWAP_TOTAL CV_SWAP_USED CV_MEM_CACHE CV_MEM_DIRTY CV_MEM_WB CV_MEM_AVAIL <<< "$(read_mem)"
+    is_num "${CV_MEM_TOTAL:-}" || CV_MEM_TOTAL=0
+    is_num "${CV_MEM_USED:-}" || CV_MEM_USED=0
+    is_num "${CV_SWAP_TOTAL:-}" || CV_SWAP_TOTAL=0
+    is_num "${CV_SWAP_USED:-}" || CV_SWAP_USED=0
+
+    read -r CV_LOAD1 CV_LOAD5 CV_LOAD15 CV_RUNNING CV_TOTPROC _ <<< "$(read_loadavg)"
+
+    local pgi pgo oom
+    read -r pgi pgo oom <<< "$(read_vmstat)"
+    is_num "${pgi:-}" || pgi=0
+    is_num "${pgo:-}" || pgo=0
+    is_num "${oom:-}" || oom=0
+    CV_OOM=$oom
+    CV_PG_IN=$(awk -v n="$pgi" -v p="$PREV_PG_IN" -v pg="$PAGESIZE" -v d="$dt" 'BEGIN{ v=(n-p)*pg/d; if(v<0)v=0; printf "%.0f", v }')
+    CV_PG_OUT=$(awk -v n="$pgo" -v p="$PREV_PG_OUT" -v pg="$PAGESIZE" -v d="$dt" 'BEGIN{ v=(n-p)*pg/d; if(v<0)v=0; printf "%.0f", v }')
+    PREV_PG_IN=$pgi; PREV_PG_OUT=$pgo
+
+    local rx tx re te rd td
+    read -r rx tx re te rd td <<< "$(net_read)"
+    is_num "${rx:-}" || rx=0
+    is_num "${tx:-}" || tx=0
+    CV_RX_TOTAL=$rx; CV_TX_TOTAL=$tx
+    CV_RX_RATE=$(awk -v n="$rx" -v p="$PREV_RX" -v d="$dt" 'BEGIN{ v=(n-p)/d; if(v<0)v=0; printf "%.0f", v }')
+    CV_TX_RATE=$(awk -v n="$tx" -v p="$PREV_TX" -v d="$dt" 'BEGIN{ v=(n-p)/d; if(v<0)v=0; printf "%.0f", v }')
+    CV_NET_DOWN_INC=$(( rx - PREV_RX )); [ "$CV_NET_DOWN_INC" -lt 0 ] && CV_NET_DOWN_INC=0
+    CV_NET_UP_INC=$(( tx - PREV_TX ));   [ "$CV_NET_UP_INC" -lt 0 ] && CV_NET_UP_INC=0
+    CV_RXERR=$(( re - PREV_RXERR )); [ "$CV_RXERR" -lt 0 ] && CV_RXERR=0
+    CV_TXERR=$(( te - PREV_TXERR )); [ "$CV_TXERR" -lt 0 ] && CV_TXERR=0
+    CV_RXDROP=$(( rd - PREV_RXDROP )); [ "$CV_RXDROP" -lt 0 ] && CV_RXDROP=0
+    CV_TXDROP=$(( td - PREV_TXDROP )); [ "$CV_TXDROP" -lt 0 ] && CV_TXDROP=0
+    [ "${CV_RX_RATE%%.*}" -gt "${CV_PEAK_RX%%.*}" ] 2>/dev/null && CV_PEAK_RX=$CV_RX_RATE
+    [ "${CV_TX_RATE%%.*}" -gt "${CV_PEAK_TX%%.*}" ] 2>/dev/null && CV_PEAK_TX=$CV_TX_RATE
+    PREV_RX=$rx; PREV_TX=$tx; PREV_RXERR=$re; PREV_TXERR=$te
+    PREV_RXDROP=$rd; PREV_TXDROP=$td
+
+    NET_HIST_RX="${NET_HIST_RX} ${CV_RX_RATE}"
+    NET_HIST_TX="${NET_HIST_TX} ${CV_TX_RATE}"
+    NET_HIST_RX=$(trim_hist "$NET_HIST_RX" 120)
+    NET_HIST_TX=$(trim_hist "$NET_HIST_TX" 120)
+
+    local tag a b c d e f g h i j k peers="" ports=""
+    while read -r tag a b c d e f g h i j k; do
+        case "$tag" in
+            STAT)
+                CV_TCP_TOTAL=$a; CV_TCP_EST=$b; CV_TCP_SYNSENT=$c; CV_TCP_SYN=$d
+                CV_TCP_FIN1=$e; CV_TCP_FIN2=$f; CV_TCP_TW=$g; CV_TCP_CW=$h
+                CV_TCP_LAST=$i; CV_TCP_LISTEN=$j; CV_TCP_CLOSING=$k
+                ;;
+            PEER) peers="${peers}${peers:+, }${a} ← ${b}" ;;
+            PORT) ports="${ports}${ports:+ }${b}" ;;
+        esac
+    done < <(tcp_scan)
+    CV_TCP_PEERS="$peers"
+    CV_TCP_PORTS="$ports"
+    is_num "${CV_TCP_TOTAL:-}" || CV_TCP_TOTAL=0
+
+    CV_UDP_TOTAL=$(udp_count)
+    is_num "${CV_UDP_TOTAL:-}" || CV_UDP_TOTAL=0
+    PREV_UPTIME=$now
+    return 0
+}
+
+sample_mid() {
+    local now dt a b c d e
+    now=$(read_uptime)
+    is_num "${now%%.*}" || now=0
+    dt=$(awk -v n="$now" -v p="$PREV_MID_UPTIME" 'BEGIN { d = n - p; if (d <= 0) d = 0.001; printf "%.3f", d }')
+
+    read -r a b c d e <<< "$(read_diskstats "$DISK_WHOLE")"
+    is_num "${a:-}" || a=0
+    MV_DISK_RD=$(awk -v n="$a" -v p="$PREV_DSK_RD" -v d="$dt" 'BEGIN{ v=(n-p)*512/d; if(v<0)v=0; printf "%.0f", v }')
+    MV_DISK_WR=$(awk -v n="$b" -v p="$PREV_DSK_WR" -v d="$dt" 'BEGIN{ v=(n-p)*512/d; if(v<0)v=0; printf "%.0f", v }')
+    MV_DISK_IOPS=$(awk -v n="$(( c + d ))" -v p="$(( PREV_DSK_RC + PREV_DSK_WC ))" -v dd="$dt" 'BEGIN{ v=(n-p)/dd; if(v<0)v=0; printf "%.0f", v }')
+    MV_DISK_UTIL=$(awk -v n="$e" -v p="$PREV_DSK_IOT" -v dd="$dt" 'BEGIN{ v=(n-p)/(dd*1000)*100; if(v<0)v=0; if(v>100)v=100; printf "%.0f", v }')
+    PREV_DSK_RD=$a; PREV_DSK_WR=$b; PREV_DSK_RC=$c; PREV_DSK_WC=$d; PREV_DSK_IOT=$e
+
+    local si so sr se ub ue ud
+    read -r si so sr se ub ue ud <<< "$(read_snmp)"
+    is_num "${so:-}" || so=0
+    is_num "${sr:-}" || sr=0
+    MV_RETRANS=$(awk -v n="$sr" -v p="$PREV_SEG_RET" -v no="$so" -v po="$PREV_SEG_OUT" 'BEGIN{ d=no-po; if(d<=0){print "0"; exit} v=(n-p)/d*100; if(v<0)v=0; printf "%.2f", v }')
+    PREV_SEG_IN=$si; PREV_SEG_OUT=$so; PREV_SEG_RET=$sr
+    is_num "${ue:-}" || ue=0
+    is_num "${ub:-}" || ub=0
+    MV_UDP_INERR=$(( ue - PREV_UDP_ERR )); [ "$MV_UDP_INERR" -lt 0 ] && MV_UDP_INERR=0
+    MV_UDP_RCVBUF=$(( ub - PREV_UDP_BUF )); [ "$MV_UDP_RCVBUF" -lt 0 ] && MV_UDP_RCVBUF=0
+    PREV_UDP_ERR=$ue; PREV_UDP_BUF=$ub
+
+    read -r MV_LIS_OVF MV_LIS_DROP MV_SYN_RET MV_TW_OVF MV_SYNCOOKIE <<< "$(read_netstat_ext)"
+    read -r MV_CONNTRACK MV_CONNTRACK_MAX <<< "$(read_conntrack)"
+    is_num "${MV_CONNTRACK:-}" || MV_CONNTRACK=0
+    is_num "${MV_CONNTRACK_MAX:-}" || MV_CONNTRACK_MAX=0
+
+    MV_PROCS=$(proc_top "$CV_PROC_MODE" "$dt")
+    proc_enrich
+    PREV_MID_UPTIME=$now
+    return 0
+}
+
+sample_slow() {
+    SV_DISK=$(disk_capacity 3)
+    SV_INODE=$(disk_inode)
+    SV_TEMP=$(read_temp)
+    SV_OS=$(read_os)
+    SV_KERNEL=$(uname -r 2>/dev/null || echo "?")
+    SV_ARCH=$(uname -m 2>/dev/null || echo "?")
+    SV_HOST=$(hostname 2>/dev/null || echo "localhost")
+    SV_CORES_N=$(read_core_count)
+    SV_USERS=$(count_users)
+    SV_ZOMBIE=$(count_zombie)
+    SV_UPTIME=$(read_uptime)
+    SV_IP=$(iface_ip "$(printf '%s' "$IFACE_LIST" | awk '{print $1}')")
+    if [ "$PROC_ROOT" = "/proc" ] && [ "$HAS_SYSTEMCTL" = "1" ]; then
+        SV_SYSTEMD_FAIL=$(systemctl --failed --no-legend 2>/dev/null | awk 'END{print NR+0}')
+    else
+        SV_SYSTEMD_FAIL=0
+    fi
+    is_num "${SV_CORES_N:-}" || SV_CORES_N=1
+    is_num "${SV_ZOMBIE:-}" || SV_ZOMBIE=0
+    is_num "${SV_SYSTEMD_FAIL:-}" || SV_SYSTEMD_FAIL=0
+    is_num "${SV_USERS:-}" || SV_USERS=0
+    return 0
+}
+
+dispatch_frames() {
+    local now
+    now=$(read_uptime)
+    is_num "${now%%.*}" || now=0
+    T_FAST=$now
+    sample_fast
+    local dtm
+    dtm=$(awk -v n="$now" -v p="$T_MID" 'BEGIN{printf "%.1f", n-p}')
+    if [ "${dtm%%.*}" -ge 10 ] 2>/dev/null; then T_MID=$now; sample_mid; fi
+    local dts
+    dts=$(awk -v n="$now" -v p="$T_SLOW" 'BEGIN{printf "%.1f", n-p}')
+    if [ "${dts%%.*}" -ge 60 ] 2>/dev/null; then T_SLOW=$now; sample_slow; fi
+    return 0
+}
+
+#===============================================================================
+# 16. 渲染
+#
+# 渲染约定: 所有行先用变量拼接成完整字符串, 再统一输出。
+# 严禁使用多参数 printf —— 格式符与参数数量一旦不匹配, bash 会复用格式串,
+# 产出重复/错位的表格。这是 v1 最严重的缺陷类型, 此处从写法上规避。
+#===============================================================================
+p_line() {
+    if [ "$IS_TTY" = "1" ]; then printf '%s\033[K\n' "$1"
+    else printf '%s\n' "$1"; fi
+}
+
+state_color() {
+    case "$1" in
+        R) printf '%s' "$C_GREEN" ;;
+        D|Z) printf '%s' "$C_RED" ;;
+        T) printf '%s' "$C_YELLOW" ;;
+        *) printf '%s' "$C_DIM" ;;
+    esac
+}
+
+proc_enrich() {
+    # 为 TOP 进程补全命令行 (只读前 N 个, 开销可控)
+    local pline pid cmd out=""
+    [ -n "${MV_PROCS:-}" ] || return 0
+    while IFS= read -r pline; do
+        [ -z "$pline" ] && continue
+        pid=${pline#*|}; pid=${pid#*|}; pid=${pid%%|*}
+        cmd=""
+        if is_num "$pid" && [ -r "$PROC_ROOT/$pid/cmdline" ]; then
+            cmd=$(tr '\0' ' ' < "$PROC_ROOT/$pid/cmdline" 2>/dev/null)
+            cmd=${cmd% }
+        fi
+        if [ -n "$cmd" ]; then
+            out="${out}${pline}|${cmd}
+"
+        else
+            out="${out}${pline}
+"
+        fi
+    done <<EOF
+$MV_PROCS
+EOF
+    MV_PROCS="$out"
+}
+
+render() {
+    term_width
+    local W=$TERM_COLS
+    [ "$W" -gt 110 ] && W=110
+    local bw=$(( W / 4 ))
+    [ "$bw" -lt 8 ] && bw=8
+    [ "$bw" -gt 24 ] && bw=24
+    local now up loadn line i
+    local HB_RXT HB_TXT HB_SUM HB_MU HB_MT HB_CA HB_SU HB_ST HB_DI HB_WB
+    local HR_RX HR_TX HR_PKR HR_PKT HR_PGI HR_PGO HR_DR HR_DW
+    local HB_PRX HB_PTX HB_QT HB_ETA
+    local BA_CPU BA_MEM BA_SW BA_Q BA_D1 BA_D2
+    local PC_CPU PC_MEM PC_Q PC_D1 PC_D2 PC_IN
+    local mempct swappct
+
+    now=$(date '+%Y-%m-%d %H:%M:%S')
+    up=$(fmt_uptime "$SV_UPTIME")
+    loadn=$(awk -v l="$CV_LOAD1" -v c="$SV_CORES_N" 'BEGIN{ printf "%.2f", (c>0)?l/c:0 }')
+    IFACE_MAIN="${IFACE_LIST%% *}"
+    [ -z "$IFACE_MAIN" ] && IFACE_MAIN="eth0"
+
+    # 分隔线按宽度缓存, 避免每帧重算
+    if [ "${HR_W:-0}" != "$W" ]; then hr_to HR_LINE "$W"; HR_W=$W; fi
+
+    # ---- 预格式化 (全部免 fork) ----
+    hb_to    HB_RXT  "$CV_RX_TOTAL";      hb_to HB_TXT "$CV_TX_TOTAL"
+    hb_to    HB_SUM  "$(( CV_RX_TOTAL + CV_TX_TOTAL ))"
+    hbr_to   HR_RX   "$CV_RX_RATE";       hbr_to HR_TX "$CV_TX_RATE"
+    hbr_to   HR_PKR  "$CV_PEAK_RX";       hbr_to HR_PKT "$CV_PEAK_TX"
+    hbr_to   HR_PGI  "$CV_PG_IN";         hbr_to HR_PGO "$CV_PG_OUT"
+    hbr_to   HR_DR   "$MV_DISK_RD";       hbr_to HR_DW "$MV_DISK_WR"
+    hb_to    HB_MU   "$CV_MEM_USED";      hb_to HB_MT "$CV_MEM_TOTAL"
+    hb_to    HB_CA   "$CV_MEM_CACHE"
+    hb_to    HB_SU   "$CV_SWAP_USED";     hb_to HB_ST "$CV_SWAP_TOTAL"
+    hb_to    HB_DI   "$CV_MEM_DIRTY";     hb_to HB_WB "$CV_MEM_WB"
+    hb_to    HB_PRX  "$CV_PERIOD_RX";     hb_to HB_PTX "$CV_PERIOD_TX"
+    hb_to    HB_QT   "$ST_QUOTA";         hb_to HB_ETA "$CV_QUOTA_ETA"
+    pc_to    PC_CPU  "$CV_CPU_TOTAL";     bar_to BA_CPU "$CV_CPU_TOTAL" "$bw"
+    mempct=$(awk -v u="$CV_MEM_USED" -v t="$CV_MEM_TOTAL" 'BEGIN{ printf "%.1f", (t>0)?u/t*100:0 }')
+    swappct=$(awk -v u="$CV_SWAP_USED" -v t="$CV_SWAP_TOTAL" 'BEGIN{ printf "%.1f", (t>0)?u/t*100:0 }')
+    pc_to    PC_MEM  "$mempct";           bar_to BA_MEM "$mempct" "$bw"
+    pc_to    PC_Q    "$CV_QUOTA_PCT";     bar_to BA_Q "$CV_QUOTA_PCT" 10
+
+    [ "$IS_TTY" = "1" ] && printf '\033[H'
+
+    # ---- 标题 ----
+    line="${C_BOLD}${PROG}${C_RESET} ${C_CYAN}${T_TITLE}${C_RESET}"
+    [ "$PAUSED" = "1" ] && line="${line} ${C_YELLOW}[${T_PAUSED}]${C_RESET}"
+    case "$CV_PROC_MODE" in
+        c) line="${line} ${C_DIM}${T_SORTCPU}${C_RESET}" ;;
+        m) line="${line} ${C_DIM}${T_SORTMEM}${C_RESET}" ;;
+    esac
+    [ "$MV_PORTS_ON" = "1" ] && line="${line} ${C_DIM}[PORTS]${C_RESET}"
+    p_line "$line"
+
+    # ---- 主机信息 ----
+    line="  ${C_CYAN}${SV_HOST}${C_RESET}  ${C_DIM}${now}${C_RESET}  ${T_UPTIME} ${C_GREEN}${up}${C_RESET}  ${C_GREEN}${SV_CORES_N}${C_RESET}${T_CORES}"
+    [ -n "${SV_TEMP:-}" ] && line="${line}  ${C_MAGENTA}${T_TEMP} ${SV_TEMP}°C${C_RESET}"
+    p_line "$line"
+    p_line "  ${C_GREEN}${IFACE_MAIN}${C_RESET} ${C_DIM}${SV_IP}${C_RESET}  ${T_USERS} ${SV_USERS}  ${T_ZOMBIE} ${SV_ZOMBIE}  ${T_FAILED} ${SV_SYSTEMD_FAIL}  ${C_DIM}${SV_OS} ${SV_KERNEL} ${SV_ARCH}${C_RESET}"
+    p_line "$HR_LINE"
+
+    if [ "$MINIMAL" != "1" ]; then
+
+    # ---- CPU ----
+    line="  ${C_BOLD}${T_CPU}${C_RESET} ${PC_CPU}${BA_CPU}${C_RESET} ${PC_CPU}${CV_CPU_TOTAL}%${C_RESET}"
+    line="${line}  ${C_DIM}${T_USER} ${CV_CPU_USER}  ${T_SYS} ${CV_CPU_SYS}  ${T_IO} ${CV_CPU_IO}${C_RESET}"
+    if [ "${CV_CPU_STEAL%%.*}" -gt 0 ] 2>/dev/null; then
+        line="${line}  ${C_YELLOW}${T_STEAL} ${CV_CPU_STEAL}${C_RESET}"
+    else
+        line="${line}  ${C_DIM}${T_STEAL} ${CV_CPU_STEAL}${C_RESET}"
+    fi
+    p_line "$line"
+
+    # ---- 每核 (按 1 展开) ----
+    if [ "$SHOW_CORES" = "1" ] && [ -n "${CV_CORES:-}" ]; then
+        i=0
+        line="  "
+        for cval in $CV_CORES; do
+            i=$(( i + 1 ))
+            [ "$i" -gt 32 ] && break
+            bar_to BA_D1 "$cval" 6
+            line="${line}${C_DIM}c$(( i - 1 ))${C_RESET} ${BA_D1} ${C_DIM}${cval}%${C_RESET}  "
+        done
+        [ "$i" -gt 32 ] && line="${line}${C_DIM}…${C_RESET}"
+        p_line "$line"
+    fi
+
+    # ---- 负载 / 进程 ----
+    if [ "${loadn%%.*}" -ge 2 ] 2>/dev/null; then lc="$C_RED"; else lc="$C_YELLOW"; fi
+    p_line "  ${C_BOLD}${T_LOAD}${C_RESET}  ${lc}${CV_LOAD1} ${CV_LOAD5} ${CV_LOAD15}${C_RESET} ${C_DIM}(${loadn}${T_LOADHINT})${C_RESET}    ${C_BOLD}${T_PROCS}${C_RESET} ${CV_RUNNING} / ${CV_TOTPROC}"
+
+    # ---- 内存 ----
+    line="  ${C_BOLD}${T_MEM}${C_RESET} ${PC_MEM}${BA_MEM}${C_RESET} ${PC_MEM}${mempct}%${C_RESET}"
+    line="${line}  ${C_WHITE}${HB_MU} / ${HB_MT}${C_RESET}"
+    line="${line}  ${C_DIM}${T_CACHE} ${HB_CA}${C_RESET}"
+    line="${line}  ${C_BOLD}${T_SWAP}${C_RESET} ${HB_SU} / ${HB_ST} (${swappct}%)"
+    p_line "$line"
+    p_line "  ${C_DIM}${T_SWAPIN} ${HR_PGI}  ${T_SWAPOUT} ${HR_PGO}   Dirty ${HB_DI}  Writeback ${HB_WB}${C_RESET}"
+    p_line "$HR_LINE"
+
+    # ---- 磁盘 ----
+    p_line "  ${C_BOLD}${T_DISK}${C_RESET}"
+    if [ -n "${SV_DISK:-}" ]; then
+        local dline dpct dmnt dused dsize
+        while IFS= read -r dline; do
+            [ -z "$dline" ] && continue
+            dpct=${dline%%|*}; dline=${dline#*|}
+            dmnt=${dline%%|*}; dline=${dline#*|}
+            dused=${dline%%|*}; dsize=${dline#*|}
+            pc_to PC_D1 "$dpct"; bar_to BA_D1 "$dpct" 8
+            p_line "    ${PC_D1}${BA_D1}${C_RESET}  ${C_CYAN}${dmnt}${C_RESET}  ${PC_D1}${dpct}%${C_RESET} ${C_DIM}${dused} / ${dsize}${C_RESET}"
+        done <<EOF
+$SV_DISK
+EOF
+    else
+        p_line "    ${C_DIM}${T_NA}${C_RESET}"
+    fi
+
+    # ---- 磁盘 IO ----
+    local imax imnt
+    imax=$(printf '%s' "${SV_INODE:-0|}" | awk -F'|' '{print $1+0}')
+    imnt=$(printf '%s' "${SV_INODE:-0|}" | awk -F'|' '{print $2}')
+    is_num "${imax:-}" || imax=0
+    pc_to PC_IN "$imax"
+    line="  ${C_BOLD}${T_DISKIO}${C_RESET}  ${C_DIM}${T_INODE}${C_RESET} ${PC_IN}${imax}%${C_RESET} ${C_DIM}${imnt}${C_RESET}"
+    line="${line}   ${T_READ} ${HR_DR}  ${T_WRITE} ${HR_DW}   IOPS ${MV_DISK_IOPS}  ${T_UTIL} ${MV_DISK_UTIL}%"
+    p_line "$line"
+    p_line "$HR_LINE"
+    fi
+
+    # ---- 网络 ----
+    p_line "  ${C_BOLD}${T_IFACE}${C_RESET}  ${C_GREEN}${IFACE_MAIN}${C_RESET} ${C_DIM}${SV_IP}${C_RESET}"
+    p_line "  ${C_BOLD}${T_CUM}${C_RESET}  ${C_CYAN}↓${HB_RXT}${C_RESET}  ${C_CYAN}↑${HB_TXT}${C_RESET}   ${C_DIM}${T_SUM} ${HB_SUM}${C_RESET}"
+    p_line "  ${C_BOLD}${T_LIVE}${C_RESET}  ${C_GREEN}↓${HR_RX}${C_RESET}  ${C_MAGENTA}↑${HR_TX}${C_RESET}   ${C_DIM}${T_PEAK} ↓${HR_PKR} ↑${HR_PKT}${C_RESET}"
+
+    local nicerr=$(( CV_RXERR + CV_TXERR + CV_RXDROP + CV_TXDROP ))
+    if [ "$nicerr" -gt 0 ]; then
+        p_line "  ${C_RED}${T_ERR} $(( CV_RXERR + CV_TXERR ))   ${T_DROP} $(( CV_RXDROP + CV_TXDROP ))${C_RESET}"
+    else
+        p_line "  ${C_DIM}${T_ERR} 0   ${T_DROP} 0${C_RESET}"
+    fi
+
+    # ---- 流量配额 ----
+    if [ "${ST_QUOTA:-0}" -gt 0 ] 2>/dev/null; then
+        line="  ${C_BOLD}${T_QUOTA}${C_RESET}  ${T_MONTH} ${HB_PRX}↓ ${HB_PTX}↑ / ${HB_QT}"
+        line="${line}  ${PC_Q}${BA_Q}${C_RESET} ${PC_Q}${CV_QUOTA_PCT}%${C_RESET}"
+        line="${line}  ${C_DIM}${T_EST} ${HB_ETA}${C_RESET}"
+        [ "${CV_QUOTA_PCT:-0}" -ge 100 ] 2>/dev/null && line="${line}  ${C_RED}${T_OVER}${C_RESET}"
+    else
+        line="  ${C_BOLD}${T_QUOTA}${C_RESET}  ${C_DIM}${T_NONE}${C_RESET}"
+    fi
+    [ "${CV_INCOMPLETE:-0}" = "1" ] && line="${line}  ${C_RED}${T_INCOMPLETE}${C_RESET}"
+    [ "$ST_MODE" = "nft" ] && line="${line}  ${C_DIM}[nft]${C_RESET}"
+    p_line "$line"
+
+    # ---- 带宽曲线 ----
+    local hmax
+    hmax=$(printf '%s' "$NET_HIST_RX $NET_HIST_TX" | awk '{ for (i = 1; i <= NF; i++) if ($i + 0 > m) m = $i + 0; print m + 0 }')
+    is_num "${hmax:-}" || hmax=0
+    [ "$hmax" -lt 65536 ] && hmax=65536
+    p_line "  ${C_GREEN}↓${C_RESET} ${C_GREEN}$(sparkline "$NET_HIST_RX" "$(( W - 6 ))" "$hmax")${C_RESET}"
+    p_line "  ${C_MAGENTA}↑${C_RESET} ${C_MAGENTA}$(sparkline "$NET_HIST_TX" "$(( W - 6 ))" "$hmax")${C_RESET}"
+    p_line "$HR_LINE"
+
+    # ---- TCP ----
+    if [ "${CV_TCP_SYN:-0}" -gt 10 ] 2>/dev/null; then sc="$C_RED"; else sc="$C_DIM"; fi
+    if [ "${CV_TCP_TW:-0}" -gt 30000 ] 2>/dev/null; then twc="$C_YELLOW"; else twc="$C_DIM"; fi
+    if [ "${CV_TCP_CW:-0}" -gt 100 ] 2>/dev/null; then cwc="$C_RED"; else cwc="$C_DIM"; fi
+    line="  ${C_BOLD}${T_TCP}${C_RESET}  ${C_WHITE}${CV_TCP_TOTAL}${C_RESET}  ${C_DIM}${T_ESTAB}${C_RESET} ${C_GREEN}${CV_TCP_EST}${C_RESET}"
+    line="${line}  ${sc}SYN_RECV ${CV_TCP_SYN}${C_RESET}"
+    line="${line}  ${twc}TIME_WAIT ${CV_TCP_TW}${C_RESET}"
+    line="${line}  ${cwc}CLOSE_WAIT ${CV_TCP_CW}${C_RESET}"
+    line="${line}  ${C_DIM}${T_LISTEN} ${CV_TCP_LISTEN}${C_RESET}"
+    p_line "$line"
+
+    local ctpct=0
+    [ "${MV_CONNTRACK_MAX:-0}" -gt 0 ] 2>/dev/null && \
+        ctpct=$(awk -v c="$MV_CONNTRACK" -v m="$MV_CONNTRACK_MAX" 'BEGIN{ printf "%.0f", c/m*100 }')
+    if [ "${MV_RETRANS:-0}" != "0" ] 2>/dev/null; then rtc="$C_YELLOW"; else rtc="$C_DIM"; fi
+    p_line "  ${C_DIM}${T_RETRANS}${C_RESET} ${rtc}${MV_RETRANS}%${C_RESET}  ${C_DIM}${T_OVERFLOW} ${MV_LIS_OVF}  ListenDrop ${MV_LIS_DROP}  SYN${T_RETRANS} ${MV_SYN_RET}  conntrack ${MV_CONNTRACK}/${MV_CONNTRACK_MAX} (${ctpct}%)${C_RESET}"
+
+    # ---- UDP ----
+    p_line "  ${C_BOLD}${T_UDP}${C_RESET}  ${C_WHITE}${CV_UDP_TOTAL}${C_RESET}  ${C_DIM}InErr ${MV_UDP_INERR}   RcvbufErr ${MV_UDP_RCVBUF}${C_RESET}"
+    [ -n "${CV_TCP_PORTS:-}" ] && p_line "  ${C_BOLD}${T_LISTEN}${C_RESET}  ${C_CYAN}${CV_TCP_PORTS}${C_RESET}"
+    [ -n "${CV_TCP_PEERS:-}" ] && p_line "  ${C_BOLD}${T_TOP}${C_RESET}  ${C_YELLOW}${CV_TCP_PEERS}${C_RESET}"
+
+    # ---- 端口 -> 进程 (按 p 展开) ----
+    if [ "$MV_PORTS_ON" = "1" ]; then
+        p_line "$HR_LINE"
+        p_line "  ${C_BOLD}${T_PORTMAP}${C_RESET}"
+        if [ -n "${MV_PORTS:-}" ]; then
+            local mline
+            while IFS= read -r mline; do
+                [ -z "$mline" ] && continue
+                p_line "    ${C_CYAN}${mline%% *}${C_RESET}  ${C_DIM}${mline#* }${C_RESET}"
+            done <<EOF
+$MV_PORTS
+EOF
+        else
+            p_line "    ${C_DIM}${T_NA}${C_RESET}"
+        fi
+    fi
+    p_line "$HR_LINE"
+
+    if [ "$MINIMAL" != "1" ]; then
+    # ---- 进程 ----
+    p_line "  ${C_BOLD}${T_TOPCPU}${C_RESET}"
+    p_line "${C_DIM}  $(printf '%7s %8s %7s %5s  %-4s %s' "$T_PID" "$T_CPU" "$T_MEMCOL" "$T_THR" "$T_ST" "$T_CMD")${C_RESET}"
+    printf '%s\n' "$MV_PROCS" | awk -F'|' \
+        -v dim="$C_DIM" -v rs="$C_RESET" -v gr="$C_GREEN" -v rd="$C_RED" -v yl="$C_YELLOW" \
+        -v wid="$(( W - 42 ))" -v tty="$IS_TTY" '
+    NF >= 6 {
+        cmd = ""
+        for (i = 7; i <= NF; i++) cmd = cmd (i > 7 ? "|" : "") $i
+        if (cmd == "") cmd = $6
+        if (wid > 8 && length(cmd) > wid) cmd = substr(cmd, 1, wid)
+        sc = dim
+        if ($4 == "R") sc = gr
+        else if ($4 == "D" || $4 == "Z") sc = rd
+        else if ($4 == "T") sc = yl
+        printf "  %s%7s %8s %7s %5s  %s%-4s%s %s", dim, $3, $1, $2, $5, sc, $4, rs, cmd
+        if (tty == 1) printf "\033[K"
+        printf "\n"
+    }'
+    dstate=$(printf '%s\n' "$MV_PROCS" | awk -F'|' '$4 == "D" { n++ } END { print n+0 }')
+    is_num "${dstate:-}" || dstate=0
+    if [ "$dstate" -gt 0 ]; then
+        p_line "  ${C_RED}${T_DSTATE} (${dstate})${C_RESET}"
+    fi
+    fi
+
+    # ---- 底栏 ----
+    p_line "$HR_LINE"
+    local alertn=0
+    if [ -n "${ALERT_FILE:-}" ] && [ -f "$ALERT_FILE" ]; then
+        alertn=$(wc -l < "$ALERT_FILE" 2>/dev/null | tr -d ' ')
+        is_num "${alertn:-}" || alertn=0
+    fi
+    if [ "$alertn" -gt 0 ]; then ac="$C_RED"; else ac="$C_DIM"; fi
+    p_line "  ${C_DIM}${T_KEYS}${C_RESET}   ${C_DIM}${T_REFRESH} ${INTERVAL}s${C_RESET}   ${C_DIM}${T_RENDER} ${RENDER_MS}ms${C_RESET}   ${ac}${T_ALERT} ${alertn}${C_RESET}"
+    [ "$IS_TTY" = "1" ] && printf '\033[J'
+    return 0
+}
+
+export_snapshot() {
+    printf '%s\n' "host,${SV_HOST:-localhost}"
+    printf '%s\n' "time,$(date '+%Y-%m-%d %H:%M:%S')"
+    printf '%s\n' "cpu_percent,$CV_CPU_TOTAL"
+    printf '%s\n' "cpu_user,$CV_CPU_USER"
+    printf '%s\n' "cpu_sys,$CV_CPU_SYS"
+    printf '%s\n' "cpu_iowait,$CV_CPU_IO"
+    printf '%s\n' "cpu_steal,$CV_CPU_STEAL"
+    printf '%s\n' "load1,$CV_LOAD1"
+    printf '%s\n' "mem_total_bytes,$CV_MEM_TOTAL"
+    printf '%s\n' "mem_used_bytes,$CV_MEM_USED"
+    printf '%s\n' "swap_total_bytes,$CV_SWAP_TOTAL"
+    printf '%s\n' "swap_used_bytes,$CV_SWAP_USED"
+    printf '%s\n' "net_iface,${IFACE_LIST%% *}"
+    printf '%s\n' "net_rx_bytes,$CV_RX_TOTAL"
+    printf '%s\n' "net_tx_bytes,$CV_TX_TOTAL"
+    printf '%s\n' "net_rx_bps,$CV_RX_RATE"
+    printf '%s\n' "net_tx_bps,$CV_TX_RATE"
+    printf '%s\n' "net_peak_rx_bps,$CV_PEAK_RX"
+    printf '%s\n' "net_peak_tx_bps,$CV_PEAK_TX"
+    printf '%s\n' "tcp_total,$CV_TCP_TOTAL"
+    printf '%s\n' "tcp_established,$CV_TCP_EST"
+    printf '%s\n' "tcp_syn_recv,$CV_TCP_SYN"
+    printf '%s\n' "tcp_time_wait,$CV_TCP_TW"
+    printf '%s\n' "tcp_close_wait,$CV_TCP_CW"
+    printf '%s\n' "tcp_listen,$CV_TCP_LISTEN"
+    printf '%s\n' "udp_total,$CV_UDP_TOTAL"
+    printf '%s\n' "disk_read_bps,$MV_DISK_RD"
+    printf '%s\n' "disk_write_bps,$MV_DISK_WR"
+    printf '%s\n' "conntrack,$MV_CONNTRACK"
+    printf '%s\n' "period_rx_bytes,$CV_PERIOD_RX"
+    printf '%s\n' "period_tx_bytes,$CV_PERIOD_TX"
+    printf '%s\n' "quota_bytes,$ST_QUOTA"
+    printf '%s\n' "quota_percent,$CV_QUOTA_PCT"
+}
+
+#===============================================================================
+# 17. 交互循环
+#===============================================================================
+enter_screen() {
+    [ "$IS_TTY" = "1" ] || return 0
+    if [ "$HAS_STTY" = "1" ]; then
+        SAVED_STTY=$(stty -g 2>/dev/null) || SAVED_STTY=""
+        stty -icanon -echo min 0 time 1 2>/dev/null
+    fi
+    printf '\033[?1049h\033[?25l\033[H'
+    return 0
+}
+
+leave_screen() {
+    [ "$IS_TTY" = "1" ] || return 0
+    if [ "$HAS_STTY" = "1" ]; then
+        [ -n "$SAVED_STTY" ] && stty "$SAVED_STTY" 2>/dev/null
+        stty sane 2>/dev/null
+    fi
+    printf '\033[?25h\033[0m\033[?1049l'
+    return 0
+}
+
+cleanup_all() {
+    leave_screen
+    [ -n "${TMPD:-}" ] && rm -rf "$TMPD" 2>/dev/null
+    exit 0
+}
+
+read_key() {
+    [ "$IS_TTY" = "1" ] || return 0
+    local k
+    k=$(dd bs=1 count=1 2>/dev/null)
+    case "$k" in
+        q|Q) return 1 ;;
+        ' ')
+            if [ "$PAUSED" = "1" ]; then PAUSED=0; else PAUSED=1; fi ;;
+        r|R) : ;;
+        c|C) CV_PROC_MODE="c"; MV_PROCS=$(proc_top "c" 10); proc_enrich ;;
+        m|M) CV_PROC_MODE="m"; MV_PROCS=$(proc_top "m" 10); proc_enrich ;;
+        1)   if [ "$SHOW_CORES" = "1" ]; then SHOW_CORES=0; else SHOW_CORES=1; fi ;;
+        p|P)
+            if [ "$MV_PORTS_ON" = "1" ]; then
+                MV_PORTS_ON=0
+            else
+                MV_PORTS_ON=1
+                MV_PORTS=$(port_map)
+            fi
+            ;;
+        +)   [ "$INTERVAL" -lt 30 ] && INTERVAL=$(( INTERVAL + 1 )) ;;
+        -)   [ "$INTERVAL" -gt 1 ] && INTERVAL=$(( INTERVAL - 1 )) ;;
+        s|S) snapshot_to_log ;;
+        '?') show_help ;;
+    esac
+    return 0
+}
+
+show_help() {
+    term_width
+    local W=$TERM_COLS
+    [ "$W" -gt 110 ] && W=110
+    [ "$IS_TTY" = "1" ] && printf '\033[H'
+    p_line "$(hr_line "$W")"
+    p_line "  ${C_BOLD}${PROG} ${VERSION} — ${T_HELP}${C_RESET}"
+    p_line "$(hr_line "$W")"
+    p_line "  ${T_KEYS_HELP_1}"
+    p_line "  ${T_KEYS_HELP_2}"
+    p_line "  ${T_KEYS_HELP_3}"
+    p_line "  ${T_KEYS_HELP_4}"
+    p_line "$(hr_line "$W")"
+    p_line "  ${C_DIM}${T_PRESS_ANY}${C_RESET}"
+    dd bs=1 count=1 >/dev/null 2>&1
+    return 0
+}
+
+snapshot_to_log() {
+    local f="$LOG_DIR/snapshot-$(date +%Y%m%d).log"
+    mkdir -p "$LOG_DIR" 2>/dev/null
+    {
+        printf '=== %s ===\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+        export_snapshot
+        printf '\n'
+    } >> "$f" 2>/dev/null
+    return 0
+}
+
+interactive_loop() {
+    local t0 t1 spent remain
+    PAUSED=0
+    SHOW_CORES=0
+    MV_PORTS_ON=0
+    sample_slow
+    sample_prime
+    sleep 1
+    sample_fast
+    sample_mid
+    enter_screen
+    trap cleanup_all EXIT INT TERM HUP
+    while :; do
+        t0=$(read_uptime)
+        if [ "$PAUSED" != "1" ]; then
+            dispatch_frames
+            quota_update
+        fi
+        t1=$(read_uptime)
+        RENDER_MS=$(awk -v n="$t1" -v p="$t0" 'BEGIN{printf "%.0f", (n-p)*1000}')
+        render
+        read_key || break
+        if [ "$PAUSED" != "1" ]; then
+            spent=$(awk -v n="$(read_uptime)" -v p="$t0" 'BEGIN{printf "%.3f", n-p}')
+            remain=$(awk -v i="$INTERVAL" -v s="$spent" 'BEGIN{ r=i-s; if (r < 0) r = 0; printf "%.3f", r }')
+            sleep "$remain" 2>/dev/null || sleep 1
+        else
+            sleep 0.2 2>/dev/null || sleep 1
+        fi
+    done
+    leave_screen
+    trap - EXIT INT TERM HUP
+    return 0
+}
+
+#===============================================================================
+# 18. 后台采集
+#===============================================================================
+rotate_logs() {
+    local today f
+    today=$(date +%Y-%m-%d)
+    [ "$today" = "$LAST_DATE" ] && return 0
+    LAST_DATE="$today"
+    ALERT_FILE="$LOG_DIR/alert-$today.log"
+    mkdir -p "$LOG_DIR" 2>/dev/null
+    for f in "$LOG_DIR"/collect-*.csv; do
+        [ -e "$f" ] || continue
+        case "$f" in *"$today"*) continue ;; esac
+        [ "$HAS_GZIP" = "1" ] && gzip -f "$f" 2>/dev/null
+    done
+    if command -v find >/dev/null 2>&1; then
+        find "$LOG_DIR" -maxdepth 1 -name 'collect-*.csv.gz' -type f -mtime "+${KEEP_DAYS:-30}" -delete 2>/dev/null
+        find "$LOG_DIR" -maxdepth 1 -name 'alert-*.log' -type f -mtime "+${KEEP_DAYS:-30}" -delete 2>/dev/null
+    fi
+    return 0
+}
+
+write_csv() {
+    local f mempct swappct
+    [ -n "$LAST_DATE" ] || return 0
+    f="$LOG_DIR/collect-$LAST_DATE.csv"
+    mkdir -p "$LOG_DIR" 2>/dev/null
+    if [ ! -s "$f" ]; then
+        printf '%s\n' "时间,epoch,uptime,cpu,mem,swap,load1,down_bps,up_bps,tcp,udp,disk_rd,disk_wr,rx_err,tx_err,rx_bytes,tx_bytes" > "$f" 2>/dev/null
+    fi
+    mempct=$(awk -v u="$CV_MEM_USED" -v t="$CV_MEM_TOTAL" 'BEGIN{ printf "%.1f", (t>0)?u/t*100:0 }')
+    swappct=$(awk -v u="$CV_SWAP_USED" -v t="$CV_SWAP_TOTAL" 'BEGIN{ printf "%.1f", (t>0)?u/t*100:0 }')
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "$(date +%s)" "${SV_UPTIME%%.*}" \
+        "$CV_CPU_TOTAL" "$mempct" "$swappct" "$CV_LOAD1" \
+        "$CV_RX_RATE" "$CV_TX_RATE" "$CV_TCP_TOTAL" "$CV_UDP_TOTAL" \
+        "$MV_DISK_RD" "$MV_DISK_WR" "$CV_RXERR" "$CV_TXERR" \
+        "$CV_NET_DOWN_INC" "$CV_NET_UP_INC" >> "$f" 2>/dev/null
+    return 0
+}
+
+daemon_loop() {
+    mkdir -p "$LOG_DIR" 2>/dev/null
+    LAST_DATE=""
+    KEEP_DAYS=$(is_num "${KEEP_DAYS:-}" && printf '%s' "$KEEP_DAYS" || printf '30')
+    SV_CORES_N=$(read_core_count)
+    sample_slow
+    sample_prime
+    rotate_logs
+    sleep 1
+    while :; do
+        dispatch_frames
+        quota_update
+        rotate_logs
+        write_csv
+        state_save
+        alert_scan
+        sleep "$DAEMON_INTERVAL" 2>/dev/null || sleep 5
+    done
+}
+
+start_daemon() {
+    local pid
+    if [ -f "$PID_FILE" ]; then
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        if is_num "${pid:-}" && kill -0 "$pid" 2>/dev/null; then
+            printf '%s %s\n' "${T_ALREADY:-后台采集已在运行, pid:}" "$pid"
+            return 1
+        fi
+        rm -f "$PID_FILE" 2>/dev/null
+    fi
+    if [ "$HAS_FLOCK" = "1" ]; then
+        exec 9>"$LOCK_FILE" 2>/dev/null
+        if ! flock -n 9 2>/dev/null; then
+            printf '%s\n' "${T_ALREADY:-后台采集已在运行}"
+            return 1
+        fi
+    fi
+    mkdir -p "${PID_FILE%/*}" 2>/dev/null
+    echo $$ > "$PID_FILE" 2>/dev/null
+    trap 'rm -f "$PID_FILE" 2>/dev/null; exit 0' INT TERM EXIT
+    printf '%s %s\n' "${T_DAEMON_READY:-后台采集已启动, 日志目录:}" "$LOG_DIR"
+    daemon_loop
+    return 0
+}
+
+#===============================================================================
+# 19. 安装 / 卸载 / 服务管理
+#===============================================================================
+resolve_self() {
+    local s="$0"
+    case "$s" in
+        */*) printf '%s' "$s" ;;
+        *) command -v "$PROG" 2>/dev/null || printf '%s/%s' "$(pwd)" "$s" ;;
+    esac
+}
+
+need_root() {
+    if [ "$(id -u 2>/dev/null || echo 1)" != "0" ]; then
+        printf '%s\n' "错误: $1 需要 root 权限, 请使用 sudo $PROG $1" >&2
+        return 1
+    fi
+    return 0
+}
+
+do_install() {
+    need_root "--install" || return 1
+    local self
+    self=$(resolve_self)
+    if [ ! -r "$self" ]; then
+        printf '%s\n' "错误: 无法读取脚本自身 ($self)" >&2
+        return 1
+    fi
+    mkdir -p /usr/local/bin 2>/dev/null
+    cp "$self" "$BIN_PATH" 2>/dev/null || { printf '%s\n' "错误: 无法写入 $BIN_PATH" >&2; return 1; }
+    chmod 755 "$BIN_PATH" 2>/dev/null
+
+    mkdir -p "$CONFIG_DIR" /var/lib/htop-s "$LOG_DIR" 2>/dev/null
+    if [ ! -f "$CONF_FILE" ]; then
+        {
+            printf '# htop-s 配置\n'
+            printf 'iface=%s\n' "${IFACE_LIST%% *}"
+            printf 'interval=2\n'
+            printf 'quota=%s\n' "${ST_QUOTA:-0}"
+            printf 'reset_day=%s\n' "${ST_RESET_DAY:-1}"
+            printf 'keep_days=30\n'
+            printf 'acct=proc\n'
+        } > "$CONF_FILE" 2>/dev/null
+    fi
+    if [ ! -f "$STATE_FILE" ]; then
+        ST_PERIOD_START=$(period_start "${ST_RESET_DAY:-1}")
+        ST_MODE="proc"
+        state_save
+    fi
+
+    if [ "$HAS_SYSTEMCTL" != "1" ]; then
+        printf '%s\n' "警告: 未检测到 systemd, 无法安装开机自启。" >&2
+        printf '%s\n' "可手动后台运行: nohup $BIN_PATH --daemon >/dev/null 2>&1 &" >&2
+        return 1
+    fi
+
+    cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=htop-s server monitor daemon
+After=network-pre.target local-fs.target
+Wants=network-pre.target
+ConditionPathExists=$BIN_PATH
+
+[Service]
+Type=simple
+ExecStart=$BIN_PATH --daemon
+ExecStartPost=$BIN_PATH --ensure-acct
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=always
+RestartSec=3
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+MemoryMax=64M
+CPUQuota=10%
+LimitNOFILE=4096
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    if [ ! -s "$SERVICE_FILE" ]; then
+        printf '%s\n' "错误: 无法写入 $SERVICE_FILE" >&2
+        return 1
+    fi
+
+    if [ "$OPT_WITH_MOTD" = "1" ]; then
+        cat > "$MOTD_FILE" <<EOF
+# htop-s 登录提示
+if [ -n "\$PS1" ] && [ -x $BIN_PATH ]; then
+    echo "提示: 输入 htop-s 查看服务器实时监控"
+fi
+EOF
+        chmod 644 "$MOTD_FILE" 2>/dev/null
+    fi
+
+    systemctl daemon-reload 2>/dev/null
+    systemctl enable htop-s.service 2>/dev/null
+    systemctl restart htop-s.service 2>/dev/null
+    sleep 1
+    if systemctl is-active htop-s.service >/dev/null 2>&1; then
+        printf '%s\n' "安装成功: $BIN_PATH -> htop-s.service (已启动, 开机自启)"
+    else
+        printf '%s\n' "服务已安装但未成功启动, 请检查: journalctl -u htop-s -n 30" >&2
+    fi
+    printf '%s\n' "状态: $PROG --status   日志: $PROG --log   卸载: sudo $PROG --uninstall"
+    return 0
+}
+
+do_uninstall() {
+    need_root "--uninstall" || return 1
+    if [ "$HAS_SYSTEMCTL" = "1" ]; then
+        systemctl disable --now htop-s.service 2>/dev/null
+        rm -f "$SERVICE_FILE" 2>/dev/null
+        systemctl daemon-reload 2>/dev/null
+        printf '%s\n' "已移除 systemd 服务 htop-s.service"
+    fi
+    nft_delete
+    rm -f "$MOTD_FILE" 2>/dev/null
+    if [ "$OPT_PURGE" = "1" ]; then
+        rm -rf /var/lib/htop-s /var/log/htop-s "$CONFIG_DIR" 2>/dev/null
+        printf '%s\n' "已清理状态、日志与配置"
+    fi
+    rm -f "$BIN_PATH" 2>/dev/null && printf '%s\n' "已删除 $BIN_PATH"
+    [ "$OPT_PURGE" != "1" ] && printf '%s\n' "注意: 日志/状态/配置已保留, 彻底清理请加 --purge"
+    return 0
+}
+
+do_upgrade() {
+    need_root "--upgrade" || return 1
+    local self
+    self=$(resolve_self)
+    [ -r "$self" ] || { printf '%s\n' "错误: 无法读取脚本自身" >&2; return 1; }
+    if ! bash -n "$self" 2>/dev/null; then
+        printf '%s\n' "错误: 新版本语法检查未通过, 已中止升级" >&2
+        return 1
+    fi
+    [ -f "$BIN_PATH" ] && cp "$BIN_PATH" "$BIN_PATH.bak" 2>/dev/null
+    cp "$self" "$BIN_PATH" 2>/dev/null || { printf '%s\n' "错误: 覆盖失败" >&2; return 1; }
+    chmod 755 "$BIN_PATH" 2>/dev/null
+    if [ "$HAS_SYSTEMCTL" = "1" ] && [ -f "$SERVICE_FILE" ]; then
+        systemctl daemon-reload 2>/dev/null
+        systemctl restart htop-s.service 2>/dev/null
+    fi
+    printf '%s\n' "升级完成 (旧版备份在 $BIN_PATH.bak)"
+    return 0
+}
+
+svc_start() {
+    need_root "--start" || return 1
+    if [ "$HAS_SYSTEMCTL" = "1" ] && [ -f "$SERVICE_FILE" ]; then
+        systemctl start htop-s.service 2>/dev/null && printf '%s\n' "已启动 htop-s.service"
+    else
+        printf '%s\n' "未安装服务, 请先执行: sudo $PROG --install" >&2
+        return 1
+    fi
+    return 0
+}
+
+svc_stop() {
+    need_root "--stop" || return 1
+    if [ "$HAS_SYSTEMCTL" = "1" ] && systemctl is-active htop-s.service >/dev/null 2>&1; then
+        systemctl stop htop-s.service 2>/dev/null && printf '%s\n' "已停止 htop-s.service"
+    else
+        printf '%s\n' "服务未在运行"
+    fi
+    if [ -f "$PID_FILE" ]; then
+        local pid
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        if is_num "${pid:-}" && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null && printf '%s\n' "已停止后台采集进程 (pid $pid)"
+        fi
+        rm -f "$PID_FILE" 2>/dev/null
+    fi
+    printf '%s\n' "注意: nftables 计数规则已保留, 避免流量统计断点"
+    return 0
+}
+
+svc_restart() {
+    need_root "--restart" || return 1
+    if [ "$HAS_SYSTEMCTL" = "1" ] && [ -f "$SERVICE_FILE" ]; then
+        systemctl restart htop-s.service 2>/dev/null && printf '%s\n' "已重启 htop-s.service"
+    else
+        printf '%s\n' "未安装服务" >&2
+        return 1
+    fi
+    return 0
+}
+
+do_status() {
+    local svc="未安装" act="停止" en="disabled"
+    if [ "$HAS_SYSTEMCTL" = "1" ] && [ -f "$SERVICE_FILE" ]; then
+        svc="已安装"
+        systemctl is-active htop-s.service >/dev/null 2>&1 && act="运行中" || act="已停止"
+        systemctl is-enabled htop-s.service >/dev/null 2>&1 && en="enabled (开机自启)" || en="disabled"
+    fi
+    printf '%s\n' "=== ${PROG} ${VERSION} 状态 ==="
+    printf '  %-12s %s\n' "systemd 服务" "$svc"
+    printf '  %-12s %s\n' "运行状态" "$act"
+    printf '  %-12s %s\n' "开机自启" "$en"
+    local pids="未运行"
+    if [ -f "$PID_FILE" ]; then
+        local pid
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        if is_num "${pid:-}" && kill -0 "$pid" 2>/dev/null; then pids="运行中 (pid $pid)"; else pids="已停止 (残留 pid 文件)"; fi
+    fi
+    printf '  %-12s %s\n' "采集进程" "$pids"
+    printf '  %-12s %s\n' "日志目录" "$LOG_DIR"
+    if [ -d "$LOG_DIR" ]; then
+        local n sz
+        n=$(ls -1 "$LOG_DIR" 2>/dev/null | wc -l | tr -d ' ')
+        sz=$(du -sh "$LOG_DIR" 2>/dev/null | awk '{print $1}')
+        printf '  %-12s %s 个文件, 共 %s\n' "日志" "${n:-0}" "${sz:-?}"
+    fi
+    if [ -n "$ST_PERIOD_START" ]; then
+        printf '  %-12s %s (重置日 %s)\n' "计量周期" "$ST_PERIOD_START" "$ST_RESET_DAY"
+    fi
+    if [ "${ST_QUOTA:-0}" -gt 0 ] 2>/dev/null; then
+        printf '  %-12s %s\n' "月配额" "$(human_bytes "$ST_QUOTA")"
+    else
+        printf '  %-12s %s\n' "月配额" "未设置"
+    fi
+    if [ "$HAS_NFT" = "1" ]; then
+        if nft_exists; then printf '  %-12s %s\n' "流量计数" "nftables 增强模式 (表 inet htop_s)"; else printf '  %-12s %s\n' "流量计数" "未启用 (可执行 --acct on)"; fi
+    else
+        printf '  %-12s %s\n' "流量计数" "基础模式 (无 nft 命令)"
+    fi
+    printf '  %-12s %s\n' "状态文件" "$STATE_FILE"
+    printf '  %-12s %s\n' "配置文件" "$CONF_FILE"
+    return 0
+}
+
+do_acct() {
+    local v="$1"
+    case "$v" in
+        on)
+            need_root "--acct on" || return 1
+            if [ "$HAS_NFT" != "1" ]; then printf '%s\n' "错误: 未找到 nft 命令, 无法启用增强模式" >&2; return 1; fi
+            [ -z "$IFACE_LIST" ] && IFACE_LIST=$(iface_detect)
+            if nft_create; then
+                ST_MODE="nft"
+                ST_NFT_RX_LAST=0; ST_NFT_TX_LAST=0
+                config_set acct nft
+                state_save
+                printf '%s\n' "已启用 nftables 增强模式 (独立表 inet htop_s, 不影响现有防火墙规则)"
+                [ "$HAS_SYSTEMCTL" = "1" ] && [ -f "$SERVICE_FILE" ] && systemctl restart htop-s.service 2>/dev/null
+            else
+                printf '%s\n' "错误: 创建 nftables 表失败 (需要 root 且内核支持)" >&2
+                return 1
+            fi
+            ;;
+        off)
+            need_root "--acct off" || return 1
+            nft_delete
+            ST_MODE="proc"
+            config_set acct proc
+            state_save
+            printf '%s\n' "已关闭增强模式, 已删除自建表 inet htop_s"
+            [ "$HAS_SYSTEMCTL" = "1" ] && [ -f "$SERVICE_FILE" ] && systemctl restart htop-s.service 2>/dev/null
+            ;;
+        status|'')
+            if [ "$HAS_NFT" != "1" ]; then
+                printf '%s\n' "流量计数模式: 基础模式 (/proc/net/dev)"
+                printf '%s\n' "原因: 本机没有 nft 命令"
+            elif nft_exists; then
+                local r
+                r=$(nft_read)
+                printf '%s\n' "流量计数模式: nftables 增强模式"
+                printf '  表 inet htop_s   入站 %s   出站 %s\n' \
+                    "$(human_bytes "$(printf '%s' "$r" | awk '{print $1}')")" \
+                    "$(human_bytes "$(printf '%s' "$r" | awk '{print $2}')")"
+            else
+                printf '%s\n' "流量计数模式: 基础模式 (/proc/net/dev)"
+                printf '%s\n' "可执行 sudo $PROG --acct on 启用增强模式 (跨服务器重启不丢流量)"
+            fi
+            ;;
+        *) printf '%s\n' "用法: $PROG --acct on|off|status" >&2; return 1 ;;
+    esac
+    return 0
+}
+
+do_ensure_acct() {
+    [ "${ST_MODE:-proc}" != "nft" ] && return 0
+    [ "$HAS_NFT" != "1" ] && return 0
+    [ -z "$IFACE_LIST" ] && IFACE_LIST=$(iface_detect)
+    nft_exists && return 0
+    nft_create && printf '%s\n' "已重建 nftables 计数表"
+    return 0
+}
+
+#===============================================================================
+# 20. 查询命令
+#===============================================================================
+csv_hb() {
+    awk '{
+        v = $1 + 0
+        if (v >= 1099511627776) { r = v % 1099511627776; u = v / 1099511627776; printf "%d.%dTB", u, r * 10 / 1099511627776 }
+        else if (v >= 1073741824) { r = v % 1073741824; u = v / 1073741824; printf "%d.%dGB", u, r * 10 / 1073741824 }
+        else if (v >= 1048576) { r = v % 1048576; u = v / 1048576; printf "%d.%dMB", u, r * 10 / 1048576 }
+        else if (v >= 1024) { r = v % 1024; u = v / 1024; printf "%d.%dKB", u, r * 10 / 1024 }
+        else printf "%dB", v
+    }'
+}
+
+do_log() {
+    local n="$1" f
+    if [ ! -d "$LOG_DIR" ]; then
+        printf '%s\n' "暂无采集日志 (目录尚未创建: $LOG_DIR)"
+        printf '%s\n' "请先启动后台采集: sudo $PROG --install"
+        return 0
+    fi
+    f=$(ls -1t "$LOG_DIR"/collect-*.csv* 2>/dev/null | head -1)
+    if [ -z "$f" ]; then
+        printf '%s\n' "暂无采集日志。请先启动后台采集: sudo $PROG --install"
+        return 0
+    fi
+    printf '%s\n' "采集日志: $f"
+    case "$f" in
+        *.gz) gzip -dc "$f" 2>/dev/null | tail -n "$n" ;;
+        *)    tail -n "$n" "$f" 2>/dev/null ;;
+    esac
+    printf '\n%s\n' "提示: $PROG --log 200 查看最近 200 行"
+    return 0
+}
+
+do_alert_log() {
+    local n="$1" f
+    if [ ! -d "$LOG_DIR" ]; then
+        printf '%s\n' "暂无告警记录 (未触发过任何告警即为正常)"
+        return 0
+    fi
+    f=$(ls -1t "$LOG_DIR"/alert-*.log 2>/dev/null | head -1)
+    if [ -z "$f" ]; then
+        printf '%s\n' "暂无告警记录 (未触发过任何告警即为正常)"
+        return 0
+    fi
+    printf '%s\n' "告警日志: $f"
+    tail -n "$n" "$f" 2>/dev/null
+    return 0
+}
+
+do_today() {
+    local f="$LOG_DIR/collect-$(date +%Y-%m-%d).csv"
+    if [ ! -f "$f" ]; then
+        printf '%s\n' "今日暂无采集数据 ($f)"
+        return 0
+    fi
+    printf '%s\n' "=== 今日汇总 ($(date +%Y-%m-%d)) ==="
+    awk -F, '
+    function hb(v,   r, u) {
+        if (v >= 1099511627776) { r = v % 1099511627776; u = v / 1099511627776; return sprintf("%d.%dTB", u, r * 10 / 1099511627776) }
+        if (v >= 1073741824) { r = v % 1073741824; u = v / 1073741824; return sprintf("%d.%dGB", u, r * 10 / 1073741824) }
+        if (v >= 1048576) { r = v % 1048576; u = v / 1048576; return sprintf("%d.%dMB", u, r * 10 / 1048576) }
+        if (v >= 1024) { r = v % 1024; u = v / 1024; return sprintf("%d.%dKB", u, r * 10 / 1024) }
+        return sprintf("%dB", v)
+    }
+    NR > 1 {
+        rx += $16 + 0; tx += $17 + 0
+        if ($8 + 0 > pkd) pkd = $8 + 0
+        if ($9 + 0 > pku) pku = $9 + 0
+        if ($4 + 0 > pkc) pkc = $4 + 0
+        if ($7 + 0 > pkl) pkl = $7 + 0
+        if ($10 + 0 > pkt) pkt = $10 + 0
+        scpu += $4 + 0; sload += $7 + 0; n++
+        if (n == 1) first = $1
+        last = $1
+    }
+    END {
+        if (n == 0) { print "  无有效样本"; exit }
+        printf "  采集时段    %s ~ %s  (%d 个样本)\n", first, last, n
+        printf "  总流量      下行 %s   上行 %s   合计 %s\n", hb(rx), hb(tx), hb(rx + tx)
+        printf "  峰值带宽    下行 %s/s   上行 %s/s\n", hb(pkd), hb(pku)
+        printf "  平均 CPU    %.1f%%      峰值 CPU %.1f%%\n", scpu / n, pkc
+        printf "  平均负载    %.2f       峰值负载 %.2f\n", sload / n, pkl
+        printf "  连接数峰值  %d\n", pkt
+    }' "$f"
+    return 0
+}
+
+month_files() {
+    # 输出本计量周期内的所有采集文件
+    local ps="$1" f d
+    for f in "$LOG_DIR"/collect-*.csv "$LOG_DIR"/collect-*.csv.gz; do
+        [ -e "$f" ] || continue
+        d=${f##*/collect-}
+        d=${d%%.csv*}
+        case "$d" in
+            [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+            *) continue ;;
+        esac
+        if [ "$(d2n $(split_date "$d"))" -ge "$(d2n $(split_date "$ps"))" ] 2>/dev/null; then
+            printf '%s\n' "$f"
+        fi
+    done
+}
+
+do_month() {
+    local ps de dim
+    ps=$(period_start "${ST_RESET_DAY:-1}")
+    [ -n "$ST_PERIOD_START" ] && ps=$ST_PERIOD_START
+    printf '%s\n' "=== 本月汇总 (计量周期 $ps 起, 重置日 $ST_RESET_DAY) ==="
+    [ -d "$LOG_DIR" ] || { printf '%s\n' "  暂无采集数据"; return 0; }
+    local files
+    files=$(month_files "$ps")
+    if [ -z "$files" ]; then
+        printf '%s\n' "  本周期暂无采集数据"
+    else
+        printf '%s\n' "$files" | while IFS= read -r f; do
+            case "$f" in
+                *.gz) gzip -dc "$f" 2>/dev/null ;;
+                *)    cat "$f" 2>/dev/null ;;
+            esac
+        done | awk -F, '
+        function hb(v,   r, u) {
+            if (v >= 1099511627776) { r = v % 1099511627776; u = v / 1099511627776; return sprintf("%d.%dTB", u, r * 10 / 1099511627776) }
+            if (v >= 1073741824) { r = v % 1073741824; u = v / 1073741824; return sprintf("%d.%dGB", u, r * 10 / 1073741824) }
+            if (v >= 1048576) { r = v % 1048576; u = v / 1048576; return sprintf("%d.%dMB", u, r * 10 / 1048576) }
+            if (v >= 1024) { r = v % 1024; u = v / 1024; return sprintf("%d.%dKB", u, r * 10 / 1024) }
+            return sprintf("%dB", v)
+        }
+        $1 != "" && NF >= 17 {
+            rx += $16 + 0; tx += $17 + 0
+            if ($8 + 0 > pkd) pkd = $8 + 0
+            if ($9 + 0 > pku) pku = $9 + 0
+            if ($7 + 0 > pkl) pkl = $7 + 0
+            if ($4 + 0 > pkc) pkc = $4 + 0
+            scpu += $4 + 0; sload += $7 + 0; n++
+        }
+        END {
+            if (n == 0) { print "  无有效样本"; exit }
+            printf "  样本数      %d\n", n
+            printf "  周期总流量  下行 %s   上行 %s   合计 %s\n", hb(rx), hb(tx), hb(rx + tx)
+            printf "  峰值带宽    下行 %s/s   上行 %s/s\n", hb(pkd), hb(pku)
+            printf "  平均/峰值负载  %.2f / %.2f\n", sload / n, pkl
+            printf "  平均/峰值CPU   %.1f%% / %.1f%%\n", scpu / n, pkc
+        }'
+    fi
+    if [ "${ST_QUOTA:-0}" -gt 0 ] 2>/dev/null; then
+        de=$(days_elapsed "$ps")
+        dim=$(days_in_month "$(date +%Y)" "$(( 10#$(date +%m) ))")
+        printf '  配额        %s   已过 %s / %s 天\n' "$(human_bytes "$ST_QUOTA")" "$de" "$dim"
+    fi
+    return 0
+}
+
+do_history() {
+    local h="${STATE_FILE%/*}/history" n="${1:-12}"
+    if [ ! -f "$h" ]; then
+        printf '%s\n' "暂无历史归档 (每个计量周期结束时自动记录)"
+        return 0
+    fi
+    printf '%s\n' "=== 历史流量归档 (最近 $n 个周期) ==="
+    tail -n "$n" "$h" | awk -F, '
+    function hb(v,   r, u) {
+        if (v >= 1099511627776) { r = v % 1099511627776; u = v / 1099511627776; return sprintf("%d.%dTB", u, r * 10 / 1099511627776) }
+        if (v >= 1073741824) { r = v % 1073741824; u = v / 1073741824; return sprintf("%d.%dGB", u, r * 10 / 1073741824) }
+        if (v >= 1048576) { r = v % 1048576; u = v / 1048576; return sprintf("%d.%dMB", u, r * 10 / 1048576) }
+        if (v >= 1024) { r = v % 1024; u = v / 1024; return sprintf("%d.%dKB", u, r * 10 / 1024) }
+        return sprintf("%dB", v)
+    }
+    { printf "  %s   下行 %s   上行 %s   合计 %s\n", $1, hb($2), hb($3), hb($2 + $3) }'
+    return 0
+}
+
+do_config_show() {
+    printf '%s\n' "=== 当前生效配置 ==="
+    printf '  %-12s %s\n' "网卡" "$IFACE_LIST"
+    printf '  %-12s %s\n' "刷新间隔" "${INTERVAL}s"
+    printf '  %-12s %s\n' "采集间隔" "${DAEMON_INTERVAL}s"
+    printf '  %-12s %s\n' "计量重置日" "$ST_RESET_DAY"
+    if [ "${ST_QUOTA:-0}" -gt 0 ] 2>/dev/null; then
+        printf '  %-12s %s\n' "月配额" "$(human_bytes "$ST_QUOTA")"
+    else
+        printf '  %-12s %s\n' "月配额" "未设置"
+    fi
+    printf '  %-12s %s 天\n' "日志保留" "${KEEP_DAYS:-30}"
+    printf '  %-12s %s\n' "流量计数" "$ST_MODE"
+    printf '  %-12s %s\n' "界面语言" "$OUT_LANG"
+    printf '  %-12s %s\n' "通知命令" "${NOTIFY_CMD:-未设置}"
+    printf '  %-12s %s\n' "下载代理" "${HT_S_PROXY:-未设置}"
+    printf '  %-12s %s\n' "发布仓库" "$REPO_OWNER/$REPO_NAME"
+    printf '  %-12s %s\n' "配置文件" "$CONF_FILE"
+    printf '  %-12s %s\n' "状态文件" "$STATE_FILE"
+    return 0
+}
+
+do_test_alert() {
+    local line rc
+    line="$(date '+%Y-%m-%d %H:%M:%S') [TEST] [test] 这是一条测试告警 (当前值 1, 阈值 0)"
+    mkdir -p "$LOG_DIR" 2>/dev/null
+    printf '%s\n' "$line" >> "$ALERT_FILE" 2>/dev/null
+    printf '%s\n' "已写入告警日志: $ALERT_FILE"
+    if [ -n "$NOTIFY_CMD" ]; then
+        printf '%s\n' "正在执行通知命令: $NOTIFY_CMD"
+        printf '%s' "$line" | eval "$NOTIFY_CMD"
+        rc=$?
+        printf '\n%s\n' "通知命令执行完成 (退出码 $rc)"
+    else
+        printf '%s\n' "未配置 NOTIFY_CMD, 仅写入本地日志"
+        printf '%s\n' "如需推送, 在 $CONF_FILE 中设置 notify_cmd=..."
+    fi
+    return 0
+}
+
+#===============================================================================
+# 21. 环境自检
+#===============================================================================
+CHK_FAIL=0
+
+chk() {
+    local label="$1" val="$2" st="$3" note="$4" color="$C_GREEN"
+    case "$st" in
+        SKIP) color="$C_DIM" ;;
+        FAIL) color="$C_RED"; CHK_FAIL=$(( CHK_FAIL + 1 )) ;;
+    esac
+    printf '  %s%-11s%s %-30s %s%-4s%s %s\n' "$C_DIM" "$label" "$C_RESET" "$val" "$color" "$st" "$C_RESET" "${note:-}"
+}
+
+do_check() {
+    term_width
+    printf '%s\n' "$(hr_line "$TERM_COLS")"
+    printf '  %s%s\n' "$(bold "$PROG 环境自检 v$VERSION")" ""
+    printf '%s\n' "$(hr_line "$TERM_COLS")"
+
+    # 系统
+    local os k
+    os=$(read_os)
+    k=$(uname -r 2>/dev/null || echo "?")
+    chk "系统" "$(uname -s 2>/dev/null || echo '?') $k $(uname -m 2>/dev/null || echo '?')" "OK" ""
+    chk "发行版" "$os" "OK" ""
+
+    # bash
+    local bv="${BASH_VERSION:-unknown}"
+    case "$bv" in
+        3.*|4.*|5.*|6.*|7.*|8.*) chk "bash" "$bv" "OK" "需要 >= 3.2" ;;
+        *) chk "bash" "$bv" "FAIL" "需要 >= 3.2" ;;
+    esac
+
+    # awk
+    local av
+    av=$(awk 'BEGIN{print "ok"}' 2>/dev/null)
+    if [ "$av" = "ok" ]; then
+        av=$(awk --version 2>/dev/null | head -1)
+        [ -z "$av" ] && av="busybox awk 或其它 POSIX awk"
+        chk "awk" "$av" "OK" "POSIX 兼容即可"
+    else
+        chk "awk" "不可用" "FAIL" "本脚本强依赖 awk"
+    fi
+
+    # 时钟源
+    local up
+    up=$(read_uptime)
+    if [ "$up" != "0" ] && [ -n "$up" ]; then chk "时钟源" "$PROC_ROOT/uptime $up" "OK" "精度 10ms"; else chk "时钟源" "$PROC_ROOT/uptime" "FAIL" "无法读取"; fi
+
+    chk "页大小" "$PAGESIZE" "OK" ""
+    chk "CLK_TCK" "$CLK_TCK" "OK" ""
+
+    # 数据源
+    local n
+    n=$(read_core_count)
+    chk "CPU 核数" "$n" "OK" "来自 $PROC_ROOT/stat"
+
+    n=$(cat "$PROC_ROOT"/[0-9]*/stat 2>/dev/null | wc -l | tr -d ' ')
+    is_num "${n:-}" || n=0
+    if [ "$n" -gt 0 ]; then chk "进程采集" "$n 个进程" "OK" "$PROC_ROOT/[pid]/stat"; else chk "进程采集" "0" "FAIL" "无进程可读"; fi
+
+    if [ -r "$PROC_ROOT/meminfo" ]; then chk "内存" "$PROC_ROOT/meminfo" "OK" ""; else chk "内存" "缺失" "FAIL" ""; fi
+
+    if command -v df >/dev/null 2>&1; then
+        n=$(df -PT 2>/dev/null | wc -l | tr -d ' ')
+        chk "磁盘容量" "df -PT" "OK" "$n 行输出"
+    else
+        chk "磁盘容量" "df 缺失" "FAIL" "磁盘分区将显示 N/A"
+    fi
+
+    if [ -r "$PROC_ROOT/diskstats" ]; then
+        n=$(disk_whole_list)
+        chk "磁盘 IO" "$PROC_ROOT/diskstats" "OK" "整盘: $n"
+    else
+        chk "磁盘 IO" "缺失" "SKIP" "磁盘 IO 将显示 0"
+    fi
+
+    n=$(printf '%s' "$IFACE_LIST" | awk '{print $1}')
+    if [ -r "$PROC_ROOT/net/dev" ]; then chk "网卡" "$n ($(iface_ip "$n"))" "OK" ""; else chk "网卡" "缺失" "FAIL" ""; fi
+
+    if [ -r "$PROC_ROOT/net/tcp" ]; then
+        local t
+        t=$(tcp_scan | awk 'NR == 1 { print $2 }')
+        chk "TCP 采集" "$PROC_ROOT/net/tcp" "OK" "$t 个连接"
+    else
+        chk "TCP 采集" "缺失" "FAIL" ""
+    fi
+
+    if [ -r "$PROC_ROOT/net/netstat" ]; then chk "协议栈" "$PROC_ROOT/net/netstat" "OK" "表头动态匹配"; else chk "协议栈" "缺失" "SKIP" "重传率等显示 0"; fi
+    if [ -r "$PROC_ROOT/net/snmp" ]; then chk "UDP 统计" "$PROC_ROOT/net/snmp" "OK" ""; else chk "UDP 统计" "缺失" "SKIP" "UDP 错误显示 0"; fi
+
+    local ct cm
+    read -r ct cm <<< "$(read_conntrack)"
+    if [ "${cm:-0}" -gt 0 ] 2>/dev/null; then chk "conntrack" "$ct / $cm" "OK" ""; else chk "conntrack" "模块未加载" "SKIP" "虚拟机常见"; fi
+
+    local tp
+    tp=$(read_temp)
+    if [ -n "${tp:-}" ]; then chk "温度" "${tp}°C" "OK" ""; else chk "温度" "无热区" "SKIP" "虚拟机常见"; fi
+
+    # nftables
+    if [ "$HAS_NFT" = "1" ]; then
+        local uid
+        uid=$(id -u 2>/dev/null || echo 1)
+        if [ "$uid" = "0" ]; then
+            if nft_exists; then chk "nftables" "表 inet htop_s 存在" "OK" "增强模式生效中"; else chk "nftables" "nft 可用" "OK" "可执行 --acct on 启用"; fi
+        else
+            chk "nftables" "需要 root" "SKIP" "非 root 无法创建计数表"
+        fi
+    else
+        chk "nftables" "命令缺失" "SKIP" "使用基础模式 /proc/net/dev"
+    fi
+
+    # systemd
+    if [ "$HAS_SYSTEMCTL" = "1" ]; then chk "systemd" "可用" "OK" "支持开机自启"; else chk "systemd" "不可用" "SKIP" "无法安装服务"; fi
+
+    # 终端能力
+    local cols
+    cols=${COLUMNS:-$(stty size 2>/dev/null | awk '{print $2}')}
+    is_num "${cols:-}" || cols=0
+    if [ "$cols" -ge 80 ] 2>/dev/null; then chk "终端宽度" "${cols} 列" "OK" ""
+    elif [ "$cols" -gt 0 ]; then chk "终端宽度" "${cols} 列" "SKIP" "建议 >= 80, 将进入紧凑模式"
+    else chk "终端宽度" "非交互" "SKIP" "重定向输出, 键盘交互禁用"; fi
+
+    printf '%s\n' "$(hr_line "$TERM_COLS")"
+    if [ "$CHK_FAIL" = "0" ]; then
+        printf '  %s%s%s\n' "$C_GREEN" "结论: 全部功能可用" "$C_RESET"
+    else
+        printf '  %s%s%s\n' "$C_RED" "结论: $CHK_FAIL 项不可用, 对应分区会降级显示 N/A" "$C_RESET"
+    fi
+    printf '  流量计数模式: %s\n' "$ST_MODE"
+    return 0
+}
+
+#===============================================================================
+# 22. 内置自测
+#===============================================================================
+ST_PASS=0
+ST_FAIL=0
+
+assert_eq() {
+    local name="$1" exp="$2" act="$3"
+    if [ "$exp" = "$act" ]; then
+        ST_PASS=$(( ST_PASS + 1 ))
+        printf '  %s[PASS]%s %s\n' "$C_GREEN" "$C_RESET" "$name"
+    else
+        ST_FAIL=$(( ST_FAIL + 1 ))
+        printf '  %s[FAIL]%s %s  期望[%s] 实际[%s]\n' "$C_RED" "$C_RESET" "$name" "$exp" "$act"
+    fi
+}
+
+do_selftest() {
+    printf '%s\n' "$(hr_line 70)"
+    printf '  %s\n' "$(bold "$PROG 内置自测 v$VERSION")"
+    printf '%s\n' "$(hr_line 70)"
+
+    # 1. bash 3.2 兼容性静态扫描
+    printf '\n  %s\n' "$(bold "1. bash 3.2 兼容性扫描")"
+    local self targets found="" hits
+    self=$(resolve_self)
+    if [ -r "$self" ]; then
+        # 扫描时排除含 HT_S_SCAN 标记的清单行本身, 以及纯注释行
+        for targets in 'declare -A' 'mapfile' 'readarray' '\$\{[A-Za-z_][A-Za-z0-9_]*\^\^\}' '\$\{[A-Za-z_][A-Za-z0-9_]*,,}' '&>>' 'date +%s%N' 'local -n'; do # HT_S_SCAN
+            hits=$(grep -nE -- "$targets" "$self" 2>/dev/null | grep -v 'HT_S_SCAN' | grep -vE '^[0-9]+:[[:space:]]*#')
+            [ -n "$hits" ] && found="${found}${found:+, }${targets}"
+        done
+        if [ -z "$found" ]; then
+            assert_eq "无 bash4 专有语法" "clean" "clean"
+        else
+            assert_eq "无 bash4 专有语法" "clean" "$found"
+        fi
+    else
+        printf '  %s[SKIP]%s 无法定位脚本自身, 跳过静态扫描\n' "$C_DIM" "$C_RESET"
+    fi
+
+    # 2. 单位换算
+    printf '\n  %s\n' "$(bold "2. 单位换算")"
+    assert_eq "human_bytes 0"      "0B"     "$(human_bytes 0)"
+    assert_eq "human_bytes 1023"   "1023B"  "$(human_bytes 1023)"
+    assert_eq "human_bytes 1024"   "1.0KB"  "$(human_bytes 1024)"
+    assert_eq "human_bytes 1536"   "1.5KB"  "$(human_bytes 1536)"
+    assert_eq "human_bytes 1048576" "1.0MB" "$(human_bytes 1048576)"
+    assert_eq "human_bytes 1073741824" "1.0GB" "$(human_bytes 1073741824)"
+    assert_eq "human_bytes 非数字" "0B" "$(human_bytes "abc")"
+    assert_eq "human_bytes 负数" "-1.0KB" "$(human_bytes -1024)"
+
+    # 3. 进度条
+    printf '\n  %s\n' "$(bold "3. 进度条")"
+    local oldascii="$USE_ASCII"
+    USE_ASCII=1
+    assert_eq "bar 0%   宽度10" "----------" "$(bar 0 10)"
+    assert_eq "bar 50%  宽度10" "#####-----" "$(bar 50 10)"
+    assert_eq "bar 100% 宽度10" "##########" "$(bar 100 10)"
+    assert_eq "bar 超界 150%"   "##########" "$(bar 150 10)"
+    assert_eq "bar 负数 -50%"   "----------" "$(bar -50 10)"
+    USE_ASCII=$oldascii
+
+    # 4. 日期算术
+    printf '\n  %s\n' "$(bold "4. 日期算术 (纯 shell, 不依赖 date -d)")"
+    assert_eq "闰年 2024-02" "29" "$(days_in_month 2024 2)"
+    assert_eq "平年 2026-02" "28" "$(days_in_month 2026 2)"
+    assert_eq "世纪闰年 2000-02" "29" "$(days_in_month 2000 2)"
+    assert_eq "非闰 1900-02" "28" "$(days_in_month 1900 2)"
+    assert_eq "31 天月份" "31" "$(days_in_month 2026 1)"
+    assert_eq "30 天月份" "30" "$(days_in_month 2026 4)"
+    local d1 d2
+    d1=$(d2n 2026 1 1); d2=$(d2n 2025 12 31)
+    assert_eq "跨年天序号差" "1" "$(( d1 - d2 ))"
+    d1=$(d2n 2026 3 1); d2=$(d2n 2026 2 28)
+    assert_eq "平年 2月28->3月1" "1" "$(( d1 - d2 ))"
+    d1=$(d2n 2024 3 1); d2=$(d2n 2024 2 28)
+    assert_eq "闰年 2月28->3月1" "2" "$(( d1 - d2 ))"
+
+    # 5. CPU 差分
+    printf '\n  %s\n' "$(bold "5. CPU 差分计算")"
+    local cd
+    cd=$(cpu_delta "200 0 100 2000 20 0 0 0" "100 0 50 1000 10 0 0 0")
+    assert_eq "busy%" "12.9" "$(printf '%s' "$cd" | awk '{print $1}')"
+    assert_eq "user%" "8.6"  "$(printf '%s' "$cd" | awk '{print $2}')"
+    assert_eq "sys%"  "4.3"  "$(printf '%s' "$cd" | awk '{print $3}')"
+    assert_eq "io%"   "0.9"  "$(printf '%s' "$cd" | awk '{print $4}')"
+    cd=$(cpu_delta "100 0 50 1000 10 0 0 0" "100 0 50 1000 10 0 0 0")
+    assert_eq "无变化时归零" "0.0" "$(printf '%s' "$cd" | awk '{print $1}')"
+    cd=$(cpu_delta "" "")
+    assert_eq "空输入不报错" "0.0" "$(printf '%s' "$cd" | awk '{print $1}')"
+
+    # 6. 曲线
+    printf '\n  %s\n' "$(bold "6. 带宽曲线")"
+    oldascii="$USE_ASCII"; USE_ASCII=1
+    local sp
+    sp=$(sparkline "0 1 2 3 4 5 6 7" 8 7)
+    assert_eq "长度正确" "8" "$(printf '%s' "$sp" | wc -c | tr -d ' ')"
+    sp=$(sparkline "5 5 5" 10 10)
+    assert_eq "不足宽度不补位" "3" "$(printf '%s' "$sp" | wc -c | tr -d ' ')"
+    sp=$(sparkline "" 10 10)
+    assert_eq "空输入" "0" "$(printf '%s' "$sp" | wc -c | tr -d ' ')"
+    USE_ASCII=$oldascii
+
+    # 7. TCP 解析 (构造测试夹具)
+    printf '\n  %s\n' "$(bold "7. /proc/net/tcp 解析")"
+    local mnet="$TMPD/tnet"
+    mkdir -p "$mnet/net" 2>/dev/null
+    cat > "$mnet/net/tcp" <<'TCPEOF'
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000   102        0 11111 1 0000:000000 100 0
+   1: 0100007F:1F90 0A00A8C0:01BB 01 00000000:00000000 00:00000000 00000000  1000        0 22222 1 0000:000000 100 0
+   2: 0100007F:1F90 0A00A8C0:01BC 01 00000000:00000000 00:00000000 00000000  1000        0 22222 1 0000:000000 100 0
+   3: 0100007F:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 33333 1 0000:000000 100 0
+TCPEOF
+    local saved_proc="$PROC_ROOT"
+    PROC_ROOT="$mnet"
+    local tcpout stat line
+    tcpout=$(tcp_scan)
+    stat=$(printf '%s\n' "$tcpout" | awk '$1 == "STAT" {print $2, $3, $4, $5, $11}')
+    assert_eq "总数/EST/SYN/SYN_RECV/LISTEN" "4 2 0 0 2" "$stat"
+    line=$(printf '%s\n' "$tcpout" | awk '$1 == "PEER" {print $3; exit}')
+    assert_eq "对端 IP 小端序解码" "192.168.0.10" "$line"
+    line=$(printf '%s\n' "$tcpout" | awk '$1 == "PORT" {print $3}' | sort -n | tr '\n' ' ' | sed 's/ $//')
+    assert_eq "监听端口十六进制解码" "53 80" "$line"
+    PROC_ROOT="$saved_proc"
+
+    # 8. 负载解析 (第 4 字段是 运行/总数 的坑)
+    printf '\n  %s\n' "$(bold "8. 负载与进程数解析")"
+    printf '1.24 0.98 0.71 3/512 12345\n' > "$TMPD/loadavg"
+    local oldproc2="$PROC_ROOT"
+    PROC_ROOT="$TMPD"
+    local ld
+    ld=$(read_loadavg)
+    assert_eq "load1" "1.24" "$(printf '%s' "$ld" | awk '{print $1}')"
+    assert_eq "运行中进程数" "3" "$(printf '%s' "$ld" | awk '{print $4}')"
+    assert_eq "总进程数" "512" "$(printf '%s' "$ld" | awk '{print $5}')"
+    PROC_ROOT="$oldproc2"
+
+    # 9. 网卡解析
+    printf '\n  %s\n' "$(bold "9. 网卡流量解析")"
+    local mdev="$TMPD/devnet"
+    mkdir -p "$mdev" 2>/dev/null
+    cat > "$mdev/dev" <<'DEVEOF'
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 1000       10    0    0    0     0          0         0     1000       10    0    0    0     0       0          0
+  eth0: 5000000   4000    3    7    0     0          0         0  2000000     3000   2    5    0     0       0          0
+eth0.100: 999      10    0    0    0     0          0         0      111       10    0    0    0     0       0          0
+DEVEOF
+    oldproc2="$PROC_ROOT"
+    local savediface="$IFACE_LIST"
+    PROC_ROOT="$TMPD"
+    # 需要把 net/dev 放到 net 子目录
+    mkdir -p "$TMPD/net" 2>/dev/null
+    cp "$mdev/dev" "$TMPD/net/dev" 2>/dev/null
+    IFACE_LIST="eth0"
+    local nv
+    nv=$(net_read)
+    assert_eq "eth0 精确匹配(不误配 eth0.100)" "5000000 2000000 3 2 7 5" "$nv"
+    IFACE_LIST="eth0 eth0.100"
+    nv=$(net_read)
+    assert_eq "多网卡求和" "5000999 2000111 3 2 7 5" "$nv"
+    IFACE_LIST="$savediface"
+    PROC_ROOT="$oldproc2"
+
+    # 10. 路径与安全
+    printf '\n  %s\n' "$(bold "10. 其他")"
+    assert_eq "状态文件路径按身份隔离" "yes" "$([ -n "$STATE_FILE" ] && echo yes || echo no)"
+    assert_eq "nft 表名固定" "htop_s" "htop_s"
+    assert_eq "PID 复用防护字段存在" "yes" "$(grep -q 'starttime' "$self" 2>/dev/null && echo yes || echo no)"
+
+    # 11. i18n 变量完整性 (旧版崩溃的根因就是未定义变量)
+    printf '\n  %s\n' "$(bold "11. i18n 变量完整性 (set -u 防护)")"
+    if [ -r "$self" ]; then
+        local miss
+        grep -oE '\$\{?T_[A-Z0-9_]+' "$self" 2>/dev/null | sed 's/^\${\?//' | sort > "$TMPD/ref.txt"
+        grep -oE '(^|[[:space:];|{])T_[A-Z0-9_]+=' "$self" 2>/dev/null | sed 's/.*\(T_[A-Z0-9_]*\)=/\1/' | sort > "$TMPD/def.txt"
+        miss=$(comm -23 "$TMPD/ref.txt" "$TMPD/def.txt" 2>/dev/null | tr '\n' ' ')
+        miss=$(printf '%s' "$miss" | sed 's/[[:space:]]*$//')
+        assert_eq "所有 T_ 变量均有定义" "" "$miss"
+    else
+        printf '  %s[SKIP]%s 无法定位脚本自身\n' "$C_DIM" "$C_RESET"
+    fi
+
+    printf '\n%s\n' "$(hr_line 70)"
+    if [ "$ST_FAIL" = "0" ]; then
+        printf '  %s%s%d 项全部通过%s\n' "$C_GREEN" "$C_BOLD" "$ST_PASS" "$C_RESET"
+    else
+        printf '  %s通过 %d 项, 失败 %d 项%s\n' "$C_RED" "$ST_PASS" "$ST_FAIL" "$C_RESET"
+    fi
+    printf '%s\n' "$(hr_line 70)"
+    [ "$ST_FAIL" = "0" ] && return 0
+    return 1
+}
+
+#===============================================================================
+# 23. 配置写入
+#===============================================================================
+config_set() {
+    local k="$1" v="$2" tmp
+    mkdir -p "${CONF_FILE%/*}" 2>/dev/null
+    tmp="${CONF_FILE}.tmp.$$"
+    if [ -f "$CONF_FILE" ]; then
+        awk -v k="$k" -v v="$v" '
+            { p = index($0, "="); key = substr($0, 1, p - 1)
+              if (p > 0 && key == k) { print k "=" v; found = 1; next }
+              print
+            }
+            END { if (!found) print k "=" v }
+        ' "$CONF_FILE" > "$tmp" 2>/dev/null && mv -f "$tmp" "$CONF_FILE" 2>/dev/null
+    else
+        printf '%s=%s\n' "$k" "$v" > "$tmp" 2>/dev/null && mv -f "$tmp" "$CONF_FILE" 2>/dev/null
+    fi
+    return 0
+}
+
+parse_size() {
+    # 输入 1024G / 500M / 2T / 1024 -> 字节数
+    local s="$1" num unit
+    case "$s" in
+        ''|*[!0-9KkMmGgTt]*) return 1 ;;
+    esac
+    unit=$(printf '%s' "$s" | sed 's/.*[0-9]//' 2>/dev/null)
+    num=$(printf '%s' "$s" | sed 's/[^0-9]//g' 2>/dev/null)
+    is_num "${num:-}" || return 1
+    case "$unit" in
+        T|t) num=$(( num * 1099511627776 )) ;;
+        G|g) num=$(( num * 1073741824 )) ;;
+        M|m) num=$(( num * 1048576 )) ;;
+        K|k) num=$(( num * 1024 )) ;;
+    esac
+    printf '%s' "$num"
+    return 0
+}
+
+#===============================================================================
+# 24. 帮助与参数解析
+#===============================================================================
+usage() {
+    cat <<'EOF'
+htop-s — Linux 服务器实时监控终端面板 (htop 风格)
+
+用法:
+  htop-s [选项] [命令]
+
+运行与显示:
+  (无参数)              进入实时面板 (默认 2 秒刷新)
+  -i N, --interval N    刷新间隔 N 秒 (1~30)
+  -I IF, --iface IF     监控网卡, 支持逗号分隔多网卡 (如 eth0,eth1)
+  -e, --en              英文界面
+  -a, --ascii           ASCII 字符模式 (终端不支持方块字符时)
+  -n, --snapshot        输出一次快照后退出 (排障/管道用)
+  -m, --minimal         精简模式: 只显示流量与连接
+  -p, --ports           显示端口到进程的映射 (需 root 才能看到其他用户的进程)
+
+部署与生命周期:
+  --install             安装到系统 + 开机自启 + 初始化 (需 root)
+      --with-motd       同时安装 SSH 登录提示
+  --uninstall           卸载服务与脚本 (保留数据)
+      --purge           配合 --uninstall: 彻底清理全部数据
+  --upgrade             原地升级已安装版本 (需 root)
+  --daemon              前台运行后台采集 (由 systemd 调用)
+  --start / --stop / --restart     服务控制 (需 root)
+  --status              服务/采集/配额 一览
+
+数据查询:
+  --log [N]             查看采集日志 (默认 30 行)
+  --alert [N]           查看告警日志 (默认 30 行)
+  --today               今日汇总报告
+  --month               本月汇总报告 (含配额)
+  --history [N]         历史流量归档 (默认 12 个周期)
+  --export              当前快照导出为 CSV
+
+配置:
+  --quota SIZE          月流量配额 (如 1024G / 500M / 2T, 0 表示不限)
+  --reset-day N         计量周期起始日 (1~28, 默认 1)
+  --keep N              日志保留天数 (默认 30)
+  --iface IF            持久化默认网卡
+  --config              显示当前生效配置
+  --acct on|off|status  nftables 流量计数开关 (跨重启不丢流量)
+  --ensure-acct         幂等重建 nft 计数表 (开机/升级后调用)
+
+在线更新与安装:
+  --check-update        检查是否有新版本
+  --update [=VER]       从 GitHub Release 更新 (不指定版本则取最新, 需 root)
+      --force           配合 --update: 版本相同时也强制重装
+  --proxy URL           设置下载代理 (如 http://127.0.0.1:10808)
+  -V, --version         显示版本号
+
+诊断:
+  --check               环境自检 (第一次上机器先跑这个)
+  --selftest            内置自测
+  --test-alert          发一条测试告警
+  -V, --version         版本号
+  -h, --help            本帮助
+
+示例:
+  htop-s                          查看实时面板
+  htop-s -i 1 -I eth0             1 秒刷新, 只看 eth0
+  sudo htop-s --install           安装并开机自启
+  htop-s --quota 1024G            设置每月 1TB 流量配额
+  sudo htop-s --acct on           启用 nftables 精确流量统计
+  htop-s --today                  看今天的流量和负载汇总
+  htop-s -n | grep tcp            脚本方式取一次快照
+
+一键安装 (无需先下载脚本):
+  curl -fsSL REPO/releases/latest/download/install.sh | sudo bash
+  走代理时:  curl -fsSL -x http://127.0.0.1:10808 REPO/releases/latest/download/install.sh | sudo bash
+  加 --service 顺带装好开机自启:  ... | sudo bash -s -- --service
+
+说明:
+  数据全部来自 /proc 与 /sys, 不依赖 ss/netstat/ps/free/iostat。
+  需要 bash >= 3.2 与 POSIX awk。支持 Debian/Ubuntu/CentOS/Rocky/Alpine。
+  nftables 增强模式只新建独立表 inet htop_s, 不修改任何现有防火墙规则。
+EOF
+    return 0
+}
+
+arg_err() {
+    printf '%s\n' "错误: 参数 $1 缺少或格式不正确" >&2
+    printf '%s\n' "用 $PROG -h 查看帮助" >&2
+    exit 1
+}
+
+OPT_VAL=""
+OPT_SHIFT=1
+
+optval() {
+    case "$1" in
+        *=*) OPT_VAL="${1#*=}"; OPT_SHIFT=1 ;;
+        *)   OPT_VAL="${2:-}";  OPT_SHIFT=2 ;;
+    esac
+    [ -n "$OPT_VAL" ] || return 1
+    return 0
+}
+
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -i|--interval|--interval=*)
+                optval "$1" "${2:-}" || arg_err "$1"
+                is_num "$OPT_VAL" || arg_err "$1"
+                [ "$OPT_VAL" -ge 1 ] && [ "$OPT_VAL" -le 30 ] || arg_err "$1 (需 1~30)"
+                INTERVAL=$OPT_VAL; CLI_INTERVAL=$OPT_VAL; shift "$OPT_SHIFT" ;;
+            -I)
+                optval "$1" "${2:-}" || arg_err "$1"
+                CLI_IFACE=$OPT_VAL; shift "$OPT_SHIFT" ;;
+            --iface|--iface=*)
+                optval "$1" "${2:-}" || arg_err "$1"
+                CLI_IFACE=$OPT_VAL; MODE="iface"; shift "$OPT_SHIFT" ;;
+            -e|--en)     OUT_LANG="en"; shift ;;
+            -a|--ascii)  USE_ASCII=1; shift ;;
+            -n|--snapshot) MODE="snapshot"; shift ;;
+            -m|--minimal)  MINIMAL=1; shift ;;
+            -p|--ports)    OPT_PORTS=1; shift ;;
+            --check-update) MODE="check-update"; shift ;;
+            --update)      MODE="update"; CLI_UPDATE=""; shift ;;
+            --update=*)    MODE="update"; CLI_UPDATE="${1#*=}"; shift ;;
+            --force)       OPT_FORCE=1; shift ;;
+            --proxy)
+                optval "$1" "${2:-}" || arg_err "$1"
+                CLI_PROXY=$OPT_VAL; HT_S_PROXY=$OPT_VAL; shift "$OPT_SHIFT" ;;
+            --proxy=*)
+                CLI_PROXY="${1#*=}"; HT_S_PROXY=$CLI_PROXY; shift ;;
+            --daemon)    MODE="daemon"; shift ;;
+            --install)   MODE="install"; shift ;;
+            --with-motd) OPT_WITH_MOTD=1; shift ;;
+            --uninstall) MODE="uninstall"; shift ;;
+            --purge)     OPT_PURGE=1; shift ;;
+            --upgrade)   MODE="upgrade"; shift ;;
+            --start)     MODE="start"; shift ;;
+            --stop)      MODE="stop"; shift ;;
+            --restart)   MODE="restart"; shift ;;
+            --status)    MODE="status"; shift ;;
+            --ensure-acct) MODE="ensure-acct"; shift ;;
+            --log|--log=*)
+                MODE="log"
+                optval "$1" "${2:-}" || { OPT_LOG_LINES=30; shift; continue; }
+                is_num "$OPT_VAL" && OPT_LOG_LINES=$OPT_VAL; shift "$OPT_SHIFT" ;;
+            --alert|--alert=*)
+                MODE="alert"
+                optval "$1" "${2:-}" || { OPT_ALERT_LINES=30; shift; continue; }
+                is_num "$OPT_VAL" && OPT_ALERT_LINES=$OPT_VAL; shift "$OPT_SHIFT" ;;
+            --history|--history=*)
+                MODE="history"
+                optval "$1" "${2:-}" || { OPT_HISTORY=12; shift; continue; }
+                is_num "$OPT_VAL" && OPT_HISTORY=$OPT_VAL; shift "$OPT_SHIFT" ;;
+            --today)     MODE="today"; shift ;;
+            --month)     MODE="month"; shift ;;
+            --export)    MODE="export"; shift ;;
+            --quota|--quota=*)
+                optval "$1" "${2:-}" || arg_err "$1"
+                CLI_QUOTA=$OPT_VAL; MODE="quota"; shift "$OPT_SHIFT" ;;
+            --reset-day|--reset-day=*)
+                optval "$1" "${2:-}" || arg_err "$1"
+                is_num "$OPT_VAL" || arg_err "$1"
+                CLI_RESET_DAY=$OPT_VAL; MODE="resetday"; shift "$OPT_SHIFT" ;;
+            --keep|--keep=*)
+                optval "$1" "${2:-}" || arg_err "$1"
+                is_num "$OPT_VAL" || arg_err "$1"
+                CLI_KEEP=$OPT_VAL; MODE="keep"; shift "$OPT_SHIFT" ;;
+            --config)    MODE="config"; shift ;;
+            --acct|--acct=*)
+                optval "$1" "${2:-}" || { MODE="acct"; OPT_VAL="status"; }
+                MODE="acct"; CLI_ACCT=$OPT_VAL; shift "$OPT_SHIFT" ;;
+            --check)     MODE="check"; shift ;;
+            --selftest)  MODE="selftest"; shift ;;
+            --test-alert) MODE="test-alert"; shift ;;
+            -V|--version) printf '%s %s\n' "$PROG" "$VERSION"; exit 0 ;;
+            -h|--help)   usage; exit 0 ;;
+            *) printf '%s\n' "错误: 未知参数 $1" >&2; usage >&2; exit 1 ;;
+        esac
+    done
+    # 冲突检测
+    if [ "$MODE" = "uninstall" ] && [ "$OPT_PURGE" = "1" ]; then :; fi
+    if [ "$MODE" = "install" ] && [ "$OPT_PURGE" = "1" ]; then
+        printf '%s\n' "错误: --install 不能与 --purge 同用" >&2
+        exit 1
+    fi
+    # --proxy 单独出现时作为命令处理, 与其他命令同时出现时作为修饰
+    if [ "$MODE" = "interactive" ] && [ -n "$CLI_PROXY" ]; then
+        MODE="proxy"
+    fi
+    return 0
+}
+
+strip_ansi() {
+    awk '{ gsub(/\033\[[0-9;?]*[A-Za-z]/, ""); print }'
+}
+
+#===============================================================================
+# 25. 主流程
+#===============================================================================
+main() {
+    KEEP_DAYS=30
+
+    parse_args "$@"
+    detect_caps
+    init_paths
+    init_i18n
+    init_colors
+    state_load
+    load_config
+
+    if [ ! -d "$PROC_ROOT" ]; then
+        printf '%s\n' "错误: 未找到 $PROC_ROOT, 本脚本仅支持 Linux 系统。" >&2
+        exit 1
+    fi
+
+    case "$MODE" in
+        selftest)   do_selftest; exit $? ;;
+        version)    printf '%s %s\n' "$PROG" "$VERSION"; exit 0 ;;
+    esac
+
+    IFACE_LIST="${IFACE_LIST:-$(iface_detect)}"
+    DISK_WHOLE=$(disk_whole_list)
+
+    case "$MODE" in
+        install)     do_install; exit $? ;;
+        uninstall)   do_uninstall; exit $? ;;
+        upgrade)     do_upgrade; exit $? ;;
+        start)       svc_start; exit $? ;;
+        stop)        svc_stop; exit $? ;;
+        restart)     svc_restart; exit $? ;;
+        status)      do_status; exit 0 ;;
+        ensure-acct) do_ensure_acct; exit 0 ;;
+        check-update) do_check_update; exit $? ;;
+        update)      do_update "$CLI_UPDATE" "$OPT_FORCE"; exit $? ;;
+        proxy)       do_set_proxy "$CLI_PROXY"; exit 0 ;;
+        acct)        do_acct "${CLI_ACCT:-status}"; exit $? ;;
+        log)         do_log "$OPT_LOG_LINES"; exit 0 ;;
+        alert)       do_alert_log "$OPT_ALERT_LINES"; exit 0 ;;
+        today)       do_today; exit 0 ;;
+        month)       do_month; exit 0 ;;
+        history)     do_history "$OPT_HISTORY"; exit 0 ;;
+        test-alert)  do_test_alert; exit 0 ;;
+        check)       do_check; exit 0 ;;
+        config)      do_config_show; exit 0 ;;
+        quota)
+            v=$(parse_size "$CLI_QUOTA") || { printf '%s\n' "错误: 无法解析配额 $CLI_QUOTA (示例: 1024G)" >&2; exit 1; }
+            ST_QUOTA=$v
+            config_set quota "$CLI_QUOTA"
+            ST_UPTIME_LAST=$(read_uptime)
+            state_save
+            printf '月流量配额已设置为 %s\n' "$(human_bytes "$ST_QUOTA")"
+            printf '计量周期起始日: 每月 %s 日 (用 --reset-day 修改)\n' "$ST_RESET_DAY"
+            [ "$HAS_SYSTEMCTL" = "1" ] && [ -f "$SERVICE_FILE" ] && systemctl restart htop-s.service 2>/dev/null
+            exit 0 ;;
+        resetday)
+            ST_RESET_DAY=$CLI_RESET_DAY
+            [ "$ST_RESET_DAY" -lt 1 ] && ST_RESET_DAY=1
+            [ "$ST_RESET_DAY" -gt 28 ] && ST_RESET_DAY=28
+            config_set reset_day "$ST_RESET_DAY"
+            ST_PERIOD_START=$(period_start "$ST_RESET_DAY")
+            state_save
+            printf '计量周期起始日已设置为每月 %s 日 (新周期起点: %s)\n' "$ST_RESET_DAY" "$ST_PERIOD_START"
+            exit 0 ;;
+        keep)
+            config_set keep_days "$CLI_KEEP"
+            printf '日志保留天数已设置为 %s 天\n' "$CLI_KEEP"
+            exit 0 ;;
+        iface)
+            config_set iface "$CLI_IFACE"
+            printf '默认网卡已设置为 %s\n' "$CLI_IFACE"
+            exit 0 ;;
+    esac
+
+    # 需要采集的模式
+    case "$MODE" in
+        daemon)
+            start_daemon
+            exit $? ;;
+        snapshot)
+            SV_CORES_N=$(read_core_count)
+            sample_slow
+            sample_prime
+            sleep 1
+            sample_fast
+            sample_mid
+            quota_update
+            if [ "$OPT_PORTS" = "1" ]; then
+                MV_PORTS_ON=1
+                MV_PORTS=$(port_map)
+            fi
+            render | strip_ansi
+            exit 0 ;;
+        export)
+            SV_CORES_N=$(read_core_count)
+            sample_slow
+            sample_prime
+            sleep 1
+            sample_fast
+            sample_mid
+            quota_update
+            export_snapshot
+            exit 0 ;;
+    esac
+
+    # 交互模式
+    if [ "$IS_TTY" != "1" ]; then
+        printf '%s\n' "错误: 交互面板需要终端 (stdin/stdout 不是 tty)。" >&2
+        printf '%s\n' "非交互场景请使用: $PROG -n  (单次快照)  或  $PROG --export  (CSV)" >&2
+        exit 1
+    fi
+    SV_CORES_N=$(read_core_count)
+    interactive_loop
+    exit 0
+}
+
+
+#===============================================================================
+# 24b. 版本管理与在线更新
+#
+# 说明: 监控功能零依赖, 但"检查更新/自我更新/一键安装"必然需要联网,
+#       因此这里允许使用 curl 或 wget (缺失时只影响本模块, 不影响监控)。
+#       代理优先级: --proxy 参数 > 配置文件 proxy= > 环境变量 > 无代理
+#===============================================================================
+repo_base() { printf 'https://github.com/%s/%s' "$REPO_OWNER" "$REPO_NAME"; }
+api_base()  { printf 'https://api.github.com/repos/%s/%s' "$REPO_OWNER" "$REPO_NAME"; }
+
+http_fetch() {
+    # $1=URL $2=输出文件; 失败返回非 0
+    local url="$1" out="$2"
+    local proxy="${CLI_PROXY:-${HT_S_PROXY:-${https_proxy:-${HTTPS_PROXY:-${all_proxy:-${ALL_PROXY:-}}}}}}"
+    rm -f "$out" 2>/dev/null
+    if [ "$HAS_CURL" = "1" ]; then
+        if [ -n "$proxy" ]; then
+            curl -fsSL --connect-timeout 10 --max-time 180 -x "$proxy" -o "$out" "$url" 2>/dev/null
+        else
+            curl -fsSL --connect-timeout 10 --max-time 180 -o "$out" "$url" 2>/dev/null
+        fi
+    elif [ "$HAS_WGET" = "1" ]; then
+        if [ -n "$proxy" ]; then
+            http_proxy="$proxy" https_proxy="$proxy" wget -q -T 30 -O "$out" "$url" 2>/dev/null
+        else
+            wget -q -T 30 -O "$out" "$url" 2>/dev/null
+        fi
+    else
+        printf '%s\n' "错误: 需要 curl 或 wget 才能联网 (监控功能本身不需要)" >&2
+        return 1
+    fi
+    [ -s "$out" ]
+}
+
+# 输出 1 表示 $1 比 $2 新
+version_newer() {
+    awk -v a="${1#v}" -v b="${2#v}" 'BEGIN {
+        split(a, x, "."); split(b, y, ".")
+        for (i = 1; i <= 3; i++) {
+            if ((x[i] + 0) > (y[i] + 0)) { print 1; exit }
+            if ((x[i] + 0) < (y[i] + 0)) { print 0; exit }
+        }
+        print 0
+    }'
+}
+
+latest_version() {
+    local tmp v
+    tmp="${TMPDIR:-/tmp}/${PROG}.rel.$$"
+    if ! http_fetch "$(api_base)/releases/latest" "$tmp"; then
+        rm -f "$tmp" 2>/dev/null
+        return 1
+    fi
+    v=$(grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$tmp" 2>/dev/null \
+        | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    rm -f "$tmp" 2>/dev/null
+    v="${v#v}"
+    [ -n "$v" ] || return 1
+    printf '%s' "$v"
+}
+
+do_check_update() {
+    printf '%s\n' "当前版本: v$VERSION"
+    if [ "$HAS_CURL" != "1" ] && [ "$HAS_WGET" != "1" ]; then
+        printf '%s\n' "无法检查更新: 本机没有 curl 也没有 wget" >&2
+        return 1
+    fi
+    printf '%s\n' "正在查询 ${REPO_OWNER}/${REPO_NAME} ..."
+    local lv
+    if ! lv=$(latest_version); then
+        printf '%s\n' "无法获取最新版本 (检查网络, 或用 --proxy http://host:port 指定代理)" >&2
+        return 1
+    fi
+    printf '%s\n' "线上版本: v$lv"
+    if [ "$lv" = "$VERSION" ]; then
+        printf '%s\n' "已是最新版本"
+    elif [ "$(version_newer "$lv" "$VERSION")" = "1" ]; then
+        printf '%s\n' "发现新版本, 更新命令: sudo $PROG --update"
+    else
+        printf '%s\n' "当前版本比线上更新 (本地开发版), 无需更新"
+    fi
+    return 0
+}
+
+do_update() {
+    local want="${1:-}" force="${2:-0}" url tmp got bak
+    if [ "$(id -u 2>/dev/null || echo 1)" != "0" ]; then
+        printf '%s\n' "错误: --update 需要 root 权限 (要写入 $BIN_PATH)" >&2
+        printf '%s\n' "或改用一键安装:" >&2
+        printf '%s\n' "  curl -fsSL $(repo_base)/releases/latest/download/install.sh | sudo bash" >&2
+        return 1
+    fi
+    if [ "$HAS_CURL" != "1" ] && [ "$HAS_WGET" != "1" ]; then
+        printf '%s\n' "错误: 需要 curl 或 wget" >&2
+        return 1
+    fi
+
+    if [ -z "$want" ]; then
+        printf '%s\n' "正在查询最新版本 ..."
+        if ! want=$(latest_version); then
+            printf '%s\n' "错误: 无法获取最新版本 (检查网络或 --proxy 设置)" >&2
+            return 1
+        fi
+    fi
+    want="${want#v}"
+
+    if [ "$want" = "$VERSION" ] && [ "$force" != "1" ]; then
+        printf '%s\n' "当前已是 v$VERSION, 无需更新 (加 --force 可强制重装)"
+        return 0
+    fi
+
+    url="$(repo_base)/releases/download/v${want}/${PROG}"
+    tmp="${TMPDIR:-/tmp}/${PROG}.new.$$"
+    printf '%s\n' "正在下载 v$want ..."
+    printf '%s\n' "  $url"
+    if ! http_fetch "$url" "$tmp"; then
+        printf '%s\n' "错误: 下载失败 (检查网络或 --proxy 设置)" >&2
+        rm -f "$tmp" 2>/dev/null
+        return 1
+    fi
+
+    # 保护 1: 必须是通过语法检查的 shell 脚本
+    if ! bash -n "$tmp" 2>/dev/null; then
+        printf '%s\n' "错误: 下载内容未通过语法校验, 已中止 (未做任何修改)" >&2
+        rm -f "$tmp" 2>/dev/null
+        return 1
+    fi
+    # 保护 2: 文件内版本号必须与请求版本一致
+    got=$(awk -F'"' '/^VERSION=/{print $2; exit}' "$tmp" 2>/dev/null)
+    if [ -z "$got" ]; then
+        printf '%s\n' "错误: 下载内容缺少 VERSION 声明, 已中止" >&2
+        rm -f "$tmp" 2>/dev/null
+        return 1
+    fi
+    if [ "$got" != "$want" ]; then
+        printf '%s\n' "错误: 下载文件版本号为 $got, 与请求的 $want 不符, 已中止" >&2
+        rm -f "$tmp" 2>/dev/null
+        return 1
+    fi
+
+    # 保护 3: 覆盖前备份
+    mkdir -p "${BIN_PATH%/*}" 2>/dev/null
+    if [ -f "$BIN_PATH" ]; then
+        bak="$BIN_PATH.bak"
+        cp "$BIN_PATH" "$bak" 2>/dev/null
+    fi
+    if ! cp "$tmp" "$BIN_PATH" 2>/dev/null; then
+        printf '%s\n' "错误: 无法写入 $BIN_PATH" >&2
+        rm -f "$tmp" 2>/dev/null
+        return 1
+    fi
+    chmod 755 "$BIN_PATH" 2>/dev/null
+    rm -f "$tmp" 2>/dev/null
+
+    printf '%s\n' "更新完成: v$VERSION -> v$want"
+    [ -n "${bak:-}" ] && printf '%s\n' "旧版已备份: $bak"
+    if [ "$HAS_SYSTEMCTL" = "1" ] && [ -f "$SERVICE_FILE" ]; then
+        systemctl daemon-reload 2>/dev/null
+        systemctl restart htop-s.service 2>/dev/null && printf '%s\n' "后台服务已重启"
+    fi
+    printf '%s\n' "查看版本: $PROG -V"
+    return 0
+}
+
+do_set_proxy() {
+    local p="$1"
+    if [ -z "$p" ]; then
+        printf '%s\n' "当前下载代理: ${HT_S_PROXY:-未设置}"
+        printf '%s\n' "设置方法: $PROG --proxy http://127.0.0.1:10808"
+        return 0
+    fi
+    case "$p" in
+        none|off|'') config_set proxy "" ; HT_S_PROXY=""
+            printf '%s\n' "已清除下载代理" ; return 0 ;;
+    esac
+    if ! printf '%s' "$p" | grep -qE '^[a-zA-Z0-9]+://'; then
+        p="http://$p"
+    fi
+    config_set proxy "$p"
+    HT_S_PROXY="$p"
+    printf '%s\n' "下载代理已设置为 $p"
+    printf '%s\n' "该代理仅用于 --check-update / --update / 一键安装, 监控功能不受影响"
+    return 0
+}
+main "$@"
