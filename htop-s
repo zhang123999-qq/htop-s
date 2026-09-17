@@ -17,7 +17,7 @@
 
 set -u
 
-VERSION="0.0.1"
+VERSION="0.0.2"
 PROG="htop-s"
 
 #===============================================================================
@@ -58,7 +58,7 @@ REPO_NAME="htop-s"
 HT_S_PROXY=""
 
 HAS_TPUT=0; HAS_NFT=0; HAS_SYSTEMCTL=0; HAS_FLOCK=0; HAS_GZIP=0
-HAS_CURL=0; HAS_WGET=0
+HAS_CURL=0; HAS_WGET=0; HAS_PING=0
 HAS_SORT=0; HAS_READLINK=0; HAS_STTY=0
 PAGESIZE=4096
 CLK_TCK=100
@@ -68,7 +68,7 @@ TERM_ROWS=24
 C_RESET=""; C_BOLD=""; C_DIM=""
 C_RED=""; C_GREEN=""; C_YELLOW=""; C_CYAN=""; C_MAGENTA=""; C_BLUE=""; C_WHITE=""
 
-PREV_CPU=""; PREV_CPU_CORES=""; PREV_UPTIME=""; PREV_MID_UPTIME=""
+PREV_CPU=""; PREV_CPU_CORES=""; PREV_UPTIME=""; PREV_MID_UPTIME=""; PREV_IO_TS=0; PREV_PING_TS=0
 PREV_RX=0; PREV_TX=0; PREV_RXERR=0; PREV_TXERR=0; PREV_RXDROP=0; PREV_TXDROP=0
 PREV_DSK_RD=0; PREV_DSK_WR=0; PREV_DSK_RC=0; PREV_DSK_WC=0; PREV_DSK_IOT=0
 PREV_PG_IN=0; PREV_PG_OUT=0
@@ -101,6 +101,7 @@ MV_RETRANS=0; MV_LIS_OVF=0; MV_LIS_DROP=0; MV_SYN_RET=0; MV_SYNCOOKIE=0
 MV_TW_OVF=0; MV_UDP_INERR=0; MV_UDP_RCVBUF=0
 MV_CONNTRACK=0; MV_CONNTRACK_MAX=0
 MV_PROCS=""; MV_PORTS=""; MV_PORTS_ON=0
+MV_CONNMAP=""; MV_IOMAP=""; MV_GW=""; MV_NETDOWN=0
 
 SV_DISK=""; SV_INODE=""; SV_TEMP=""; SV_OS=""; SV_KERNEL=""; SV_ARCH=""
 SV_HOST=""; SV_CORES_N=1; SV_USERS=0; SV_ZOMBIE=0; SV_UPTIME=0; SV_SYSTEMD_FAIL=0
@@ -129,6 +130,8 @@ SAVED_STTY=""; IS_TTY=0
 RENDER_MS=0
 # 界面开关 (必须在 parse_args 之前初始化为 0, 否则会覆盖命令行参数)
 MINIMAL=0
+WINCH=0
+COMPACT=0
 PAUSED=0
 SHOW_CORES=0
 MV_PORTS_ON=0
@@ -147,11 +150,11 @@ init_i18n() {
         T_MONTH="This month"; T_EST="forecast"; T_INCOMPLETE="DATA INCOMPLETE"
         T_PID="PID"; T_THR="THR"; T_ST="ST"; T_CMD="COMMAND"; T_MEMCOL="MEM"
         T_USER="user"; T_SYS="sys"; T_IO="iowait"; T_STEAL="steal"
-        T_KEYS="[q]uit [space]pause [c/m]sort [1]cores [p]ports [?]help"
+        T_KEYS="[q]uit [space]pause [c/m/n/i]sort [1]cores [p]ports [?]help"
         T_HELP="HELP"; T_PRESS_ANY="press any key to return"
         T_KEYS_HELP_1="q / Ctrl-C  quit and restore terminal"
         T_KEYS_HELP_2="space       pause / resume"
-        T_KEYS_HELP_3="c / m       sort processes by CPU / memory"
+        T_KEYS_HELP_3="c/m/n/i     sort by CPU / mem / conn / IO"
         T_KEYS_HELP_4="1 / p       toggle per-core view / port to process map"
         T_CACHE="cache"; T_RETRANS="retrans"; T_OVERFLOW="listen overflow"
         T_SWAPIN="swap in"; T_SWAPOUT="swap out"
@@ -175,11 +178,11 @@ init_i18n() {
         T_MONTH="本月"; T_EST="预计月底"; T_INCOMPLETE="数据不完整"
         T_PID="PID"; T_THR="线程"; T_ST="状态"; T_CMD="命令行"; T_MEMCOL="内存"
         T_USER="用户态"; T_SYS="内核态"; T_IO="IO等待"; T_STEAL="被抢占"
-        T_KEYS="[q]退出 [空格]暂停 [c/m]排序 [1]每核 [p]端口 [?]帮助"
+        T_KEYS="[q]退出 [空格]暂停 [c/m/n/i]排序 [1]每核 [p]端口 [?]帮助"
         T_HELP="帮助"; T_PRESS_ANY="按任意键返回"
         T_KEYS_HELP_1="q / Ctrl-C  退出并恢复终端"
         T_KEYS_HELP_2="空格        暂停 / 继续刷新"
-        T_KEYS_HELP_3="c / m       进程按 CPU / 内存 排序"
+        T_KEYS_HELP_3="c/m/n/i     进程按 CPU / 内存 / 连接数 / IO 排序"
         T_KEYS_HELP_4="1 / p       展开每核视图 / 端口→进程映射"
         T_CACHE="缓存"; T_RETRANS="重传"; T_OVERFLOW="队列溢出"
         T_SWAPIN="换页in"; T_SWAPOUT="换页out"
@@ -209,6 +212,7 @@ detect_caps() {
     command -v readlink >/dev/null 2>&1 && HAS_READLINK=1
     command -v curl >/dev/null 2>&1 && HAS_CURL=1
     command -v wget >/dev/null 2>&1 && HAS_WGET=1
+    command -v ping >/dev/null 2>&1 && HAS_PING=1
     command -v stty >/dev/null 2>&1 && HAS_STTY=1
     local v
     v=$(getconf PAGESIZE 2>/dev/null)
@@ -692,6 +696,74 @@ port_map() {
     done
 }
 
+
+# 默认网关 IPv4 (从 /proc/net/route 解析; 该文件字段为小端存储)
+read_gateway() {
+    [ -r "$PROC_ROOT/net/route" ] || return 0
+    awk '
+    function h2d(h,   i, c, v, s) {
+        s = "0123456789ABCDEF"; v = 0; h = toupper(h)
+        for (i = 1; i <= length(h); i++) {
+            c = index(s, substr(h, i, 1)) - 1
+            if (c < 0) return -1
+            v = v * 16 + c
+        }
+        return v
+    }
+    $2 == "00000000" && $3 != "00000000" {
+        g = $3
+        printf "%d.%d.%d.%d", h2d(substr(g,7,2)), h2d(substr(g,5,2)), h2d(substr(g,3,2)), h2d(substr(g,1,2))
+        exit
+    }' "$PROC_ROOT/net/route" 2>/dev/null
+}
+
+# 每个进程持有的 socket 数 —— 按 n 键排序时按需调用 (需遍历 fd, 开销较大)
+proc_conn_map() {
+    [ "$HAS_READLINK" = "1" ] || return 0
+    local p tgt pid
+    for p in "$PROC_ROOT"/[0-9]*/fd/*; do
+        [ -e "$p" ] || continue
+        tgt=$(readlink "$p" 2>/dev/null) || continue
+        case "$tgt" in
+            'socket:['*']') ;;
+            *) continue ;;
+        esac
+        pid=${p#"$PROC_ROOT"/}
+        pid=${pid%%/*}
+        printf '%s\n' "$pid"
+    done 2>/dev/null | awk '{ c[$1]++ } END { for (x in c) printf "%s %d\n", x, c[x] }'
+    return 0
+}
+
+# 每个进程的磁盘 IO 速率 B/s —— 按 i 键排序时按需调用 (需 root)
+proc_io_map() {
+    local now dt prev="$TMPD/io.prev" cur="$TMPD/io.cur"
+    now=$(read_uptime)
+    is_num "${now%%.*}" || now=0
+    dt=$(awk -v n="$now" -v p="$PREV_IO_TS" 'BEGIN { d = n - p; if (d <= 0) d = 0.001; printf "%.3f", d }')
+    awk '
+    {
+        if (FNR == 1) {
+            if (NR > 1) printf "%s %d\n", pid, rb + wb
+            pid = FILENAME
+            sub(/^.*\//, "", pid)
+            sub(/\/io$/, "", pid)
+            rb = 0; wb = 0
+        }
+        if ($1 == "read_bytes:")  rb = $2 + 0
+        if ($1 == "write_bytes:") wb = $2 + 0
+    }
+    END { if (NR > 0) printf "%s %d\n", pid, rb + wb }
+    ' "$PROC_ROOT"/[0-9]*/io 2>/dev/null > "$cur"
+    if [ -s "$prev" ] && [ -s "$cur" ]; then
+        awk -v dt="$dt" 'NR == FNR { p[$1] = $2; next }
+                         { d = $2 - p[$1]; if (d < 0) d = 0; printf "%s %d\n", $1, d / dt }' "$prev" "$cur"
+    fi
+    mv -f "$cur" "$prev" 2>/dev/null
+    PREV_IO_TS=$now
+    return 0
+}
+
 #===============================================================================
 # 9. 采集层 — 进程 / 系统
 #===============================================================================
@@ -717,16 +789,30 @@ proc_top() {
     local sortkey="$1" dt="$2" prev="$TMPD/procs.prev" cur="$TMPD/procs.cur" n="${3:-8}"
     cat "$PROC_ROOT"/[0-9]*/stat 2>/dev/null | proc_snapshot_line > "$cur" 2>/dev/null
     if [ ! -s "$cur" ]; then
-        printf '0|0|0|?|0|-\n'
+        printf '0|0|0|?|0|-|0\n'
         return 0
     fi
     if [ ! -s "$prev" ]; then
         cp "$cur" "$prev" 2>/dev/null
-        printf '0|0|0|?|0|(采样中)\n'
+        printf '0|0|0|?|0|(采样中)|0\n'
         return 0
     fi
-    awk -v dt="$dt" -v ctk="$CLK_TCK" -v pg="$PAGESIZE" -v mt="$CV_MEM_TOTAL" -v key="$sortkey" -v N="$n" '
-    BEGIN { FS = "|" }
+    local cmap="" imap=""
+    [ "$sortkey" = "n" ] && cmap=$(printf '%s' "$MV_CONNMAP" | tr '\n' ';')
+    [ "$sortkey" = "i" ] && imap=$(printf '%s' "$MV_IOMAP" | tr '\n' ';')
+    awk -v dt="$dt" -v ctk="$CLK_TCK" -v pg="$PAGESIZE" -v mt="$CV_MEM_TOTAL" \
+        -v key="$sortkey" -v N="$n" -v cmap="$cmap" -v imap="$imap" '
+    function hb(v,   r, u) {
+        if (v >= 1073741824) { r = v % 1073741824; u = v / 1073741824; return sprintf("%d.%dGB/s", u, r * 10 / 1073741824) }
+        if (v >= 1048576)    { r = v % 1048576;    u = v / 1048576;    return sprintf("%d.%dMB/s", u, r * 10 / 1048576) }
+        if (v >= 1024)       { r = v % 1024;       u = v / 1024;       return sprintf("%d.%dKB/s", u, r * 10 / 1024) }
+        return sprintf("%dB/s", v)
+    }
+    BEGIN {
+        FS = "|"
+        if (cmap != "") { m = split(cmap, e, ";"); for (i = 1; i <= m; i++) { split(e[i], kv, " "); cn[kv[1]] = kv[2] + 0 } }
+        if (imap != "") { m = split(imap, e, ";"); for (i = 1; i <= m; i++) { split(e[i], kv, " "); io[kv[1]] = kv[2] + 0 } }
+    }
     NR == FNR { pp[$1] = $8; pu[$1] = $6; ps[$1] = $7; next }
     {
         pid = $1
@@ -738,8 +824,11 @@ proc_top() {
         m = $4 * pg
         memv = (mt > 0) ? m / mt * 100 : 0
         cc = $9
-        arr[pid] = sprintf("%.1f|%.1f|%s|%s|%s|%s", cpuv, memv, pid, $2, $3, cc)
-        if (key == "m") sc[pid] = memv; else sc[pid] = cpuv
+        if (key == "n")      { met = cn[pid] + 0; met_s = sprintf("%d", met) }
+        else if (key == "i") { met = io[pid] + 0; met_s = hb(met) }
+        else                 { met = cpuv;        met_s = sprintf("%.1f%%", cpuv) }
+        arr[pid] = sprintf("%.1f|%.1f|%s|%s|%s|%s|%s", cpuv, memv, pid, $2, $3, cc, met_s)
+        sc[pid] = met
         cnt++
     }
     END {
@@ -1346,6 +1435,20 @@ alert_scan() {
     alert_eval udp_err     "$(( MV_UDP_INERR + MV_UDP_RCVBUF ))" 1 WARN 3 "UDP 收包错误" "${f_udpe:-0}"
     alert_eval oom         "$CV_OOM"        1    CRIT 1 "发生 OOM 事件"                "${f_oom:-0}"
     alert_eval dstate      "$dn"            1    CRIT 5 "存在 D 状态进程 (IO 阻塞)"     "${f_dst:-0}"
+    # 断网检测: 需要 ping 与默认网关; 任一缺失时该规则自动跳过
+    if [ "$HAS_PING" = "1" ] && [ -n "${MV_GW:-}" ]; then
+        local np
+        np=$(read_uptime); is_num "${np%%.*}" || np=0
+        np=${np%%.*}
+        if [ $(( np - PREV_PING_TS )) -ge 5 ]; then
+            if ping -c 1 -W 1 "$MV_GW" >/dev/null 2>&1; then MV_NETDOWN=0; else MV_NETDOWN=1; fi
+            PREV_PING_TS=$np
+        fi
+        alert_eval netdown "${MV_NETDOWN:-0}" 1 CRIT 3 "ping 网关 ${MV_GW} 失败, 疑似断网"
+    else
+        alert_eval netdown 0 1 CRIT 3 "ping 网关失败, 疑似断网"
+    fi
+
     if [ "${ST_QUOTA:-0}" -gt 0 ] 2>/dev/null; then
         alert_eval quota80  "$CV_QUOTA_PCT" 80   WARN 1 "月流量已达配额 80%"            "${f_q80:-0}"
         alert_eval quota100 "$CV_QUOTA_PCT" 100  CRIT 1 "月流量已超配额"                "${f_q100:-0}"
@@ -1500,6 +1603,12 @@ sample_mid() {
     is_num "${MV_CONNTRACK:-}" || MV_CONNTRACK=0
     is_num "${MV_CONNTRACK_MAX:-}" || MV_CONNTRACK_MAX=0
 
+    # n / i 排序所需的映射 (仅在该模式下刷新, 避免无谓开销)
+    if [ "$CV_PROC_MODE" = "n" ]; then
+        MV_CONNMAP=$(proc_conn_map)
+    elif [ "$CV_PROC_MODE" = "i" ]; then
+        MV_IOMAP=$(proc_io_map)
+    fi
     MV_PROCS=$(proc_top "$CV_PROC_MODE" "$dt")
     proc_enrich
     PREV_MID_UPTIME=$now
@@ -1519,6 +1628,7 @@ sample_slow() {
     SV_ZOMBIE=$(count_zombie)
     SV_UPTIME=$(read_uptime)
     SV_IP=$(iface_ip "$(printf '%s' "$IFACE_LIST" | awk '{print $1}')")
+    MV_GW=$(read_gateway)
     if [ "$PROC_ROOT" = "/proc" ] && [ "$HAS_SYSTEMCTL" = "1" ]; then
         SV_SYSTEMD_FAIL=$(systemctl --failed --no-legend 2>/dev/null | awk 'END{print NR+0}')
     else
@@ -1599,6 +1709,7 @@ render() {
     local bw=$(( W / 4 ))
     [ "$bw" -lt 8 ] && bw=8
     [ "$bw" -gt 24 ] && bw=24
+    if [ "$W" -lt 60 ]; then COMPACT=1; else COMPACT=0; fi
     local now up loadn line i
     local HB_RXT HB_TXT HB_SUM HB_MU HB_MT HB_CA HB_SU HB_ST HB_DI HB_WB
     local HR_RX HR_TX HR_PKR HR_PKT HR_PGI HR_PGO HR_DR HR_DW
@@ -1645,6 +1756,7 @@ render() {
         m) line="${line} ${C_DIM}${T_SORTMEM}${C_RESET}" ;;
     esac
     [ "$MV_PORTS_ON" = "1" ] && line="${line} ${C_DIM}[PORTS]${C_RESET}"
+    [ "$COMPACT" = "1" ] && line="${line} ${C_DIM}[紧凑]${C_RESET}"
     p_line "$line"
 
     # ---- 主机信息 ----
@@ -1667,7 +1779,7 @@ render() {
     p_line "$line"
 
     # ---- 每核 (按 1 展开) ----
-    if [ "$SHOW_CORES" = "1" ] && [ -n "${CV_CORES:-}" ]; then
+    if [ "$SHOW_CORES" = "1" ] && [ "$COMPACT" != "1" ] && [ -n "${CV_CORES:-}" ]; then
         i=0
         line="  "
         for cval in $CV_CORES; do
@@ -1711,7 +1823,8 @@ EOF
         p_line "    ${C_DIM}${T_NA}${C_RESET}"
     fi
 
-    # ---- 磁盘 IO ----
+    # ---- 磁盘 IO (紧凑模式隐藏) ----
+    if [ "$COMPACT" != "1" ]; then
     local imax imnt
     imax=$(printf '%s' "${SV_INODE:-0|}" | awk -F'|' '{print $1+0}')
     imnt=$(printf '%s' "${SV_INODE:-0|}" | awk -F'|' '{print $2}')
@@ -1720,6 +1833,7 @@ EOF
     line="  ${C_BOLD}${T_DISKIO}${C_RESET}  ${C_DIM}${T_INODE}${C_RESET} ${PC_IN}${imax}%${C_RESET} ${C_DIM}${imnt}${C_RESET}"
     line="${line}   ${T_READ} ${HR_DR}  ${T_WRITE} ${HR_DW}   IOPS ${MV_DISK_IOPS}  ${T_UTIL} ${MV_DISK_UTIL}%"
     p_line "$line"
+    fi
     p_line "$HR_LINE"
     fi
 
@@ -1780,7 +1894,7 @@ EOF
     [ -n "${CV_TCP_PEERS:-}" ] && p_line "  ${C_BOLD}${T_TOP}${C_RESET}  ${C_YELLOW}${CV_TCP_PEERS}${C_RESET}"
 
     # ---- 端口 -> 进程 (按 p 展开) ----
-    if [ "$MV_PORTS_ON" = "1" ]; then
+    if [ "$MV_PORTS_ON" = "1" ] && [ "$COMPACT" != "1" ]; then
         p_line "$HR_LINE"
         p_line "  ${C_BOLD}${T_PORTMAP}${C_RESET}"
         if [ -n "${MV_PORTS:-}" ]; then
@@ -1799,21 +1913,29 @@ EOF
 
     if [ "$MINIMAL" != "1" ]; then
     # ---- 进程 ----
-    p_line "  ${C_BOLD}${T_TOPCPU}${C_RESET}"
-    p_line "${C_DIM}  $(printf '%7s %8s %7s %5s  %-4s %s' "$T_PID" "$T_CPU" "$T_MEMCOL" "$T_THR" "$T_ST" "$T_CMD")${C_RESET}"
+    if [ "$CV_PROC_MODE" = "n" ] || [ "$CV_PROC_MODE" = "i" ]; then
+        if [ "$CV_PROC_MODE" = "n" ]; then hdr_met="CONN"; else hdr_met="IO"; fi
+        p_line "  ${C_BOLD}${T_TOPCPU}${C_RESET}  ${C_DIM}[${hdr_met}]${C_RESET}"
+        p_line "${C_DIM}  $(printf '%7s %8s %8s %7s %5s  %-4s %s' "$T_PID" "$hdr_met" "$T_CPU" "$T_MEMCOL" "$T_THR" "$T_ST" "$T_CMD")${C_RESET}"
+    else
+        p_line "  ${C_BOLD}${T_TOPCPU}${C_RESET}"
+        p_line "${C_DIM}  $(printf '%7s %8s %7s %5s  %-4s %s' "$T_PID" "$T_CPU" "$T_MEMCOL" "$T_THR" "$T_ST" "$T_CMD")${C_RESET}"
+    fi
     printf '%s\n' "$MV_PROCS" | awk -F'|' \
         -v dim="$C_DIM" -v rs="$C_RESET" -v gr="$C_GREEN" -v rd="$C_RED" -v yl="$C_YELLOW" \
-        -v wid="$(( W - 42 ))" -v tty="$IS_TTY" '
+        -v wid="$(( W - 44 ))" -v tty="$IS_TTY" -v mcol="$CV_PROC_MODE" '
     NF >= 6 {
         cmd = ""
-        for (i = 7; i <= NF; i++) cmd = cmd (i > 7 ? "|" : "") $i
+        if (NF >= 8) { for (i = 8; i <= NF; i++) cmd = cmd (i > 8 ? "|" : "") $i }
         if (cmd == "") cmd = $6
         if (wid > 8 && length(cmd) > wid) cmd = substr(cmd, 1, wid)
         sc = dim
         if ($4 == "R") sc = gr
         else if ($4 == "D" || $4 == "Z") sc = rd
         else if ($4 == "T") sc = yl
-        printf "  %s%7s %8s %7s %5s  %s%-4s%s %s", dim, $3, $1, $2, $5, sc, $4, rs, cmd
+        printf "  %s%7s", dim, $3
+        if (mcol == "n" || mcol == "i") printf " %8s", $7
+        printf " %8s %7s %5s  %s%-4s%s %s", $1, $2, $5, sc, $4, rs, cmd
         if (tty == 1) printf "\033[K"
         printf "\n"
     }'
@@ -1913,6 +2035,8 @@ read_key() {
         r|R) : ;;
         c|C) CV_PROC_MODE="c"; MV_PROCS=$(proc_top "c" 10); proc_enrich ;;
         m|M) CV_PROC_MODE="m"; MV_PROCS=$(proc_top "m" 10); proc_enrich ;;
+        n|N) CV_PROC_MODE="n"; MV_CONNMAP=$(proc_conn_map); MV_PROCS=$(proc_top "n" 10); proc_enrich ;;
+        i|I) CV_PROC_MODE="i"; MV_IOMAP=$(proc_io_map);     MV_PROCS=$(proc_top "i" 10); proc_enrich ;;
         1)   if [ "$SHOW_CORES" = "1" ]; then SHOW_CORES=0; else SHOW_CORES=1; fi ;;
         p|P)
             if [ "$MV_PORTS_ON" = "1" ]; then
@@ -1971,6 +2095,8 @@ interactive_loop() {
     sample_mid
     enter_screen
     trap cleanup_all EXIT INT TERM HUP
+    trap 'WINCH=1' WINCH
+    WINCH=0
     while :; do
         t0=$(read_uptime)
         if [ "$PAUSED" != "1" ]; then
@@ -1981,6 +2107,11 @@ interactive_loop() {
         RENDER_MS=$(awk -v n="$t1" -v p="$t0" 'BEGIN{printf "%.0f", (n-p)*1000}')
         render
         read_key || break
+        # 终端尺寸变化 (SIGWINCH): 立刻重绘, 不等待剩余刷新间隔
+        if [ "$WINCH" = "1" ]; then
+            WINCH=0
+            continue
+        fi
         if [ "$PAUSED" != "1" ]; then
             spent=$(awk -v n="$(read_uptime)" -v p="$t0" 'BEGIN{printf "%.3f", n-p}')
             remain=$(awk -v i="$INTERVAL" -v s="$spent" 'BEGIN{ r=i-s; if (r < 0) r = 0; printf "%.3f", r }')
@@ -2588,11 +2719,12 @@ do_test_alert() {
 # 21. 环境自检
 #===============================================================================
 CHK_FAIL=0
+CHK_SKIP=0
 
 chk() {
     local label="$1" val="$2" st="$3" note="$4" color="$C_GREEN"
     case "$st" in
-        SKIP) color="$C_DIM" ;;
+        SKIP) color="$C_DIM"; CHK_SKIP=$(( CHK_SKIP + 1 )) ;;
         FAIL) color="$C_RED"; CHK_FAIL=$(( CHK_FAIL + 1 )) ;;
     esac
     printf '  %s%-11s%s %-30s %s%-4s%s %s\n' "$C_DIM" "$label" "$C_RESET" "$val" "$color" "$st" "$C_RESET" "${note:-}"
@@ -2700,6 +2832,19 @@ do_check() {
     # systemd
     if [ "$HAS_SYSTEMCTL" = "1" ]; then chk "systemd" "可用" "OK" "支持开机自启"; else chk "systemd" "不可用" "SKIP" "无法安装服务"; fi
 
+    # 告警用到的可选外部命令
+    if [ "$HAS_PING" = "1" ]; then chk "ping" "可用" "OK" "支持 netdown 断网告警"; else chk "ping" "不可用" "SKIP" "netdown 规则自动跳过"; fi
+    if [ "$HAS_CURL" = "1" ]; then chk "curl" "可用" "OK" "支持 --check-update/--update"
+    elif [ "$HAS_WGET" = "1" ]; then chk "wget" "可用" "OK" "支持 --check-update/--update"
+    else chk "下载工具" "均不可用" "SKIP" "不影响监控, 仅无法在线更新"; fi
+    if [ -r "$PROC_ROOT/net/route" ]; then
+        local gw
+        gw=$(read_gateway)
+        if [ -n "$gw" ]; then chk "默认网关" "$gw" "OK" ""; else chk "默认网关" "未找到" "SKIP" "netdown 规则自动跳过"; fi
+    else
+        chk "默认网关" "缺失" "SKIP" "$PROC_ROOT/net/route 不可读"
+    fi
+
     # 终端能力
     local cols
     cols=${COLUMNS:-$(stty size 2>/dev/null | awk '{print $2}')}
@@ -2709,8 +2854,10 @@ do_check() {
     else chk "终端宽度" "非交互" "SKIP" "重定向输出, 键盘交互禁用"; fi
 
     printf '%s\n' "$(hr_line "$TERM_COLS")"
-    if [ "$CHK_FAIL" = "0" ]; then
+    if [ "$CHK_FAIL" = "0" ] && [ "$CHK_SKIP" = "0" ]; then
         printf '  %s%s%s\n' "$C_GREEN" "结论: 全部功能可用" "$C_RESET"
+    elif [ "$CHK_FAIL" = "0" ]; then
+        printf '  %s%s%s\n' "$C_GREEN" "结论: 核心功能可用, $CHK_SKIP 项因环境缺失自动降级 (见上方 SKIP 说明)" "$C_RESET"
     else
         printf '  %s%s%s\n' "$C_RED" "结论: $CHK_FAIL 项不可用, 对应分区会降级显示 N/A" "$C_RESET"
     fi
@@ -2894,13 +3041,54 @@ DEVEOF
     printf '\n  %s\n' "$(bold "11. i18n 变量完整性 (set -u 防护)")"
     if [ -r "$self" ]; then
         local miss
-        grep -oE '\$\{?T_[A-Z0-9_]+' "$self" 2>/dev/null | sed 's/^\${\?//' | sort > "$TMPD/ref.txt"
-        grep -oE '(^|[[:space:];|{])T_[A-Z0-9_]+=' "$self" 2>/dev/null | sed 's/.*\(T_[A-Z0-9_]*\)=/\1/' | sort > "$TMPD/def.txt"
+        grep -oE '\$\{?T_[A-Z0-9_]+' "$self" 2>/dev/null | sed 's/^\${\?//' | sort -u > "$TMPD/ref.txt"
+        grep -oE '(^|[[:space:];|{])T_[A-Z0-9_]+=' "$self" 2>/dev/null | sed 's/.*\(T_[A-Z0-9_]*\)=/\1/' | sort -u > "$TMPD/def.txt"
         miss=$(comm -23 "$TMPD/ref.txt" "$TMPD/def.txt" 2>/dev/null | tr '\n' ' ')
         miss=$(printf '%s' "$miss" | sed 's/[[:space:]]*$//')
         assert_eq "所有 T_ 变量均有定义" "" "$miss"
     else
         printf '  %s[SKIP]%s 无法定位脚本自身\n' "$C_DIM" "$C_RESET"
+    fi
+
+    # 12. 默认网关解析 (/proc/net/route 同为小端序存储)
+    printf '\n  %s\n' "$(bold "12. 默认网关解析")"
+    local mrt="$TMPD/rt"
+    mkdir -p "$mrt/net" 2>/dev/null
+    printf 'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n' > "$mrt/net/route"
+    printf 'eth0\t0000A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n' >> "$mrt/net/route"
+    printf 'eth0\t00000000\t0100A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n' >> "$mrt/net/route"
+    local saved_p="$PROC_ROOT"
+    PROC_ROOT="$mrt"
+    assert_eq "网关小端序解码" "192.168.0.1" "$(read_gateway)"
+    PROC_ROOT="$TMPD"
+    assert_eq "无 route 文件时为空" "" "$(read_gateway)"
+    PROC_ROOT="$saved_p"
+
+    # 13. 进程排序键 n / i (构造映射, 不依赖具体 pid, 真实机器同样可跑)
+    printf '\n  %s\n' "$(bold "13. 进程排序键 n / i")"
+    local pid_a="" pid_b="" d topn topi
+    for d in "$PROC_ROOT"/[0-9]*; do
+        [ -r "$d/stat" ] || continue
+        if [ -z "$pid_a" ]; then
+            pid_a=${d##*/}
+        elif [ -z "$pid_b" ]; then
+            pid_b=${d##*/}
+            break
+        fi
+    done
+    if [ -n "$pid_a" ] && [ -n "$pid_b" ]; then
+        CV_MEM_TOTAL=16384000
+        MV_CONNMAP="$(printf '%s 42\n%s 5' "$pid_a" "$pid_b")"
+        MV_IOMAP="$(printf '%s 2097152\n%s 1048576' "$pid_b" "$pid_a")"
+        proc_top "c" 1 >/dev/null 2>&1          # 首次调用建立差分基准
+        topn=$(proc_top "n" 1 2>/dev/null | head -1)
+        topi=$(proc_top "i" 1 2>/dev/null | head -1)
+        assert_eq "n 排序按连接数降序" "$pid_a" "$(printf '%s' "$topn" | awk -F'|' '{print $3}')"
+        assert_eq "n 模式指标列=连接数" "42" "$(printf '%s' "$topn" | awk -F'|' '{print $7}')"
+        assert_eq "i 排序按 IO 降序" "$pid_b" "$(printf '%s' "$topi" | awk -F'|' '{print $3}')"
+        assert_eq "i 模式指标列已格式化" "2.0MB/s" "$(printf '%s' "$topi" | awk -F'|' '{print $7}')"
+    else
+        printf '  %s[SKIP]%s 可读进程不足 2 个, 跳过排序键测试\n' "$C_DIM" "$C_RESET"
     fi
 
     printf '\n%s\n' "$(hr_line 70)"
@@ -3028,6 +3216,11 @@ htop-s — Linux 服务器实时监控终端面板 (htop 风格)
   curl -fsSL REPO/releases/latest/download/install.sh | sudo bash
   走代理时:  curl -fsSL -x http://127.0.0.1:10808 REPO/releases/latest/download/install.sh | sudo bash
   加 --service 顺带装好开机自启:  ... | sudo bash -s -- --service
+
+面板按键:
+  q 退出    空格 暂停    r 立即刷新    1 每核视图    p 端口→进程
+  c/m/n/i  进程排序: CPU / 内存 / 连接数 / 磁盘IO     +/- 调刷新间隔
+  s 快照入日志    ? 帮助
 
 说明:
   数据全部来自 /proc 与 /sys, 不依赖 ss/netstat/ps/free/iostat。

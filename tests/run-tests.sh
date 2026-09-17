@@ -72,6 +72,7 @@ SNAP_E=$(h -n -e 2>&1)
 SNAP_A=$(h -n -a 2>&1)
 SNAP_M=$(h -n -m 2>&1)
 SNAP_P=$(h -n -p 2>&1)
+SNAP_C=$(COLUMNS=50 h -n 2>&1)
 EXPORT=$(h --export 2>&1)
 HELP=$(h --help 2>&1)
 STATUS=$(h --status 2>&1)
@@ -115,6 +116,10 @@ chk  "-a ASCII 模式"       "$SNAP_A" "##########"
 chk  "-n -m 精简模式含网卡" "$SNAP_M" "网卡"
 chkn "-n -m 精简模式无进程表" "$SNAP_M" "命令行"
 chk  "-n -p 端口映射区标题" "$SNAP_P" "端口 → 进程"
+chk  "-n -p 列出监听端口"    "$SNAP_P" "监听"
+chk  "紧凑模式(<60列)标记"   "$SNAP_C" "[紧凑]"
+chkn "正常宽度无紧凑标记"    "$SNAP" "[紧凑]"
+chkn "紧凑模式隐藏磁盘IO行"  "$SNAP_C" "IOPS"
 
 #===============================================================================
 head1 '4. 数值正确性 (对照 mock 数据)'
