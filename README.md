@@ -33,10 +33,12 @@ chmod +x /usr/local/bin/htop-s && htop-s
 | `htop-s` | **主程序**，单文件 bash 脚本，即为最终交付物 |
 | `htop-s-开发方案.md` | 实现规格说明书：架构、数据源、算法、兼容性约束、测试验收 |
 | `htop-s-使用手册.md` | 部署与使用手册：命令、界面解读、告警配置、巡检 SOP、FAQ |
-| `tests/make-mock.sh` | 生成 mock `/proc` `/sys` 测试夹具 |
-| `tests/run-tests.sh` | 集成测试套件（语法、静态检查、面板数值、命令、daemon、边界降级） |
-
 `htop-s` 是唯一源文件，**没有构建步骤**，改完直接跑。
+
+> **测试资产不分发**：`tests/` 目录（集成测试套件与 mock 夹具）与《自测报告》
+> 仅保留在本地开发环境，**不随仓库分发**，忽略范围见 `.gitignore`。
+> 仓库对外只提供 `htop-s` 与 `install.sh` 两个可下载文件。
+> 只拿到单文件时，用 `htop-s --selftest` 做验证（内置 50 项自测，不依赖外部文件）。
 
 ---
 
@@ -145,6 +147,10 @@ htop-s --export           # 结构化 CSV, 便于程序解析
 
 ## 测试
 
+> 本节依赖本地 `tests/` 目录，而该目录**不随仓库分发**（见 `.gitignore`）。
+> 克隆仓库后若没有 `tests/`，直接用 `htop-s --selftest` 验证即可——
+> 内置自测不依赖任何外部文件。
+
 测试不依赖真实 Linux：`tests/make-mock.sh` 会生成一套真实格式的 mock `/proc` 数据，
 脚本通过 `HT_S_PROC` / `HT_S_ROOT` / `HT_S_ETC` 环境变量指向它，因此在 Windows / macOS 上
 也能验证全部解析逻辑。
@@ -158,7 +164,7 @@ HT_S_PROC=tests/mock/proc HT_S_ROOT=tests/mock/sys HT_S_ETC=tests/mock/etc \
   PATH=tests/mock/bin:$PATH bash htop-s -n
 ```
 
-内置自测（含 bash 3.2 兼容性静态扫描、单位换算、日期算术、CPU 差分、TCP 解析等 44 项）：
+内置自测（含 bash 3.2 兼容性静态扫描、i18n 变量完整性、单位换算、日期算术、CPU 差分、TCP 小端序解析、默认网关解码、进程排序键 n/i 等 **50 项**）：
 
 ```bash
 htop-s --selftest

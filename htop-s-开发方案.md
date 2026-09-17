@@ -1396,8 +1396,8 @@ https://github.com/<owner>/<repo>/releases/latest/download/<asset>
 $EDITOR htop-s              # VERSION="0.0.2"
 
 # 2. 自测
-htop-s --selftest
-bash tests/run-tests.sh
+htop-s --selftest              # 内置 50 项, 任何环境都能跑
+bash tests/run-tests.sh        # 本地开发环境专用; tests/ 不随仓库分发
 
 # 3. 提交
 git add -A && git commit -m "htop-s 0.0.2"
@@ -1443,3 +1443,56 @@ export http_proxy=http://127.0.0.1:10808
 3. 覆盖前备份为 `$BIN_PATH.bak`
 
 任一环节失败即中止，**绝不在校验未通过时覆盖现有文件**。
+
+### 18.8 仓库忽略规则
+
+仓库对外只提供 `htop-s` 与 `install.sh` 两个可下载文件，
+**测试资产与开发脚手架一律留在本地**，不随仓库分发。
+
+#### 忽略范围
+
+| 类别 | 规则 | 覆盖内容 |
+|---|---|---|
+| 测试目录 | `tests/` | 集成测试套件 `run-tests.sh`、夹具生成器 `make-mock.sh`、mock `/proc` 数据、测试沙箱 |
+| 测试文档 | `htop-s-自测报告.md` | 位于仓库根目录而非 `tests/` 下，需单独列出 |
+| 散落测试脚本 | `test-*.sh`、`*-test.sh`、`test_*.sh`、`*_test.sh`、`*.test.sh` | 防止以后在根目录随手新建的测试脚本漏网 |
+| 测试产物 | `coverage/`、`.coverage`、`htmlcov/`、`*.gcov`、`junit*.xml` | 通用覆盖率报告 |
+| 构建脚手架 | `.build/` | 开发期分片拼接用，非交付物 |
+| 运行期产物 | `*.log`、`*.pid`、`*.tmp.*` | 运行中生成 |
+| 发布产物 | `dist/` | 由 `htop-s` + `install.sh` 现场生成（含 sha256） |
+| 工具与会话状态 | `.workbuddy/` | 不属于项目源码 |
+| 旧版脚本备份 | `htop-s.v1.bak` | 存在 13 项已知缺陷，仅作对照 |
+
+#### 实现要点：`.gitignore` 对已跟踪文件无效
+
+这是最容易踩的坑。`.gitignore` **只决定未跟踪文件是否出现在 `git status` 中**；
+一个文件一旦被 `git add` 过，规则对它完全不起作用，仍会继续被提交。
+
+所以要把**已经入库**的文件排除，必须两步走：
+
+```bash
+# 1. 写入 .gitignore 规则
+$EDITOR .gitignore
+
+# 2. 把已跟踪文件移出索引 (--cached 只改索引, 本地文件原样保留)
+git rm -r --cached tests/
+git rm --cached htop-s-自测报告.md
+
+# 3. 提交并推送 —— 此刻远程仓库中这些文件才真正消失
+git commit -m "chore: 测试资产移出仓库"
+git push origin main
+```
+
+**三个必须知道的点：**
+
+1. `git rm --cached` **不删除本地文件**，只是让 git 不再跟踪它。本地仍能正常跑测试。
+2. 这一步**会让远程仓库里已有的文件消失**。文件仍在历史提交中，
+   可用 `git show <commit>:<path>` 找回，或 `git revert` 撤销本次提交。
+3. 确需强行提交某个被忽略的文件：`git add -f <路径>`；
+   查某文件为何被忽略：`git check-ignore -v <路径>`。
+
+#### 副作用与应对
+
+`tests/` 移出仓库后，从远程克隆的人无法复现集成测试。应对方式：
+`htop-s --selftest` 内置 **50 项自测且不依赖任何外部文件**，作为仓库内可用的最低验证手段。
+README 与开发流程中涉及 `tests/` 的段落均已加注说明。
