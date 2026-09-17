@@ -17,7 +17,7 @@
 
 set -u
 
-VERSION="0.0.2"
+VERSION="0.0.3"
 PROG="htop-s"
 
 #===============================================================================
@@ -30,7 +30,7 @@ ETC_ROOT="${HT_S_ETC:-/etc}"
 #===============================================================================
 # 1. 全局状态 (set -u 要求全部预初始化)
 #===============================================================================
-INTERVAL=2
+INTERVAL=5
 DAEMON_INTERVAL=5
 IFACE_LIST=""
 OUT_LANG="zh"
@@ -341,8 +341,17 @@ sparkline() {
     local data="$1" width="$2" max="$3"
     awk -v d="$data" -v w="$width" -v mx="$max" -v asc="$USE_ASCII" '
     BEGIN {
-        if (asc == 1) chars = " .:-=+*@"
-        else chars = "▁▂▃▄▅▆▇█"
+        # 用显式数组而非 substr(chars, idx, 1):
+        # sparkline 字符每个占 3 字节, 而 mawk 的 substr 按【字节】索引,
+        # 会取到半个字符并输出非法 UTF-8; gawk 按字符索引则正常。
+        # 数组元素是完整字符串字面量, 两种实现下都正确。
+        if (asc == 1) {
+            sc[1] = " "; sc[2] = "."; sc[3] = ":"; sc[4] = "-"
+            sc[5] = "="; sc[6] = "+"; sc[7] = "*"; sc[8] = "@"
+        } else {
+            sc[1] = "▁"; sc[2] = "▂"; sc[3] = "▃"; sc[4] = "▄"
+            sc[5] = "▅"; sc[6] = "▆"; sc[7] = "▇"; sc[8] = "█"
+        }
         n = split(d, a, " ")
         if (n == 0 || w < 1) { print ""; exit }
         if (mx <= 0) mx = 1
@@ -353,7 +362,7 @@ sparkline() {
             idx = int(v / mx * 7) + 1
             if (idx > 8) idx = 8
             if (idx < 1) idx = 1
-            s = s substr(chars, idx, 1)
+            s = s sc[idx]
         }
         print s
     }'
@@ -363,6 +372,21 @@ sparkline() {
 # 5. 采集层 — 基础
 #===============================================================================
 read_uptime() { awk '{print $1}' "$PROC_ROOT/uptime" 2>/dev/null || printf '0'; }
+
+# uptime "秒.百分秒" -> 厘秒整数。纯 bash, 避免为算时间差再 fork 一次 awk。
+u2cs() {
+    local v="${1:-0}" i f
+    i="${v%%.*}"
+    case "$v" in
+        *.*) f="${v#*.}" ;;
+        *)   f="0" ;;
+    esac
+    case "$i" in ''|*[!0-9]*) i=0 ;; esac
+    f="${f}00"
+    f="${f%${f#??}}"
+    case "$f" in ''|*[!0-9]*) f=0 ;; esac
+    printf '%s' "$(( i * 100 + 10#${f} ))"
+}
 
 read_cpu() {
     awk '/^cpu /{printf "%s %s %s %s %s %s %s %s\n", $2, $3, $4, $5, $6, $7, $8, $9+0; exit}' "$PROC_ROOT/stat" 2>/dev/null
@@ -398,15 +422,25 @@ cpu_delta() {
 cpu_cores_delta() {
     printf '%s\n@@@\n%s\n' "${2:-}" "${1:-}" | awk '
     /^@@@$/ { cur = 1; next }
-    !cur { if ($0 == "") next; split($0, p[++np], " "); next }
+    !cur {
+        if ($0 == "") next
+        np++
+        split($0, tmp, " ")
+        # 用 "行号,列号" 复合键存放二维数据。
+        # 不能写成 p[++np] / p[nc][i] —— 那是 gawk 独有的「数组的数组」,
+        # mawk 会报 "syntax error at or near [" 导致整段失效,
+        # 表现为每核 CPU 视图不可用。
+        for (i = 1; i <= 8; i++) p[np "," i] = tmp[i] + 0
+        next
+    }
     { if ($0 == "") next
       split($0, c, " ")
       nc++
-      if (!(nc in p)) { printf "0 "; next }
+      if (!((nc "," 1) in p)) { printf "0 "; next }
       t = 0
-      for (i = 1; i <= 8; i++) t += (c[i] - p[nc][i])
+      for (i = 1; i <= 8; i++) t += (c[i] + 0 - p[nc "," i])
       if (t <= 0) printf "0 "
-      else { v = 100 - (c[4]-p[nc][4])/t*100 - (c[5]-p[nc][5])/t*100
+      else { v = 100 - (c[4]-p[nc "," 4])/t*100 - (c[5]-p[nc "," 5])/t*100
              if (v < 0) v = 0; if (v > 100) v = 100
              printf "%d ", v }
     }
@@ -443,6 +477,55 @@ read_vmstat() {
     /^pswpin /{i=$2} /^pswpout /{o=$2} /^oom_kill /{k=$2}
     END { printf "%d %d %d\n", i+0, o+0, k+0 }' "$PROC_ROOT/vmstat" 2>/dev/null
 }
+
+# 一次 awk 读取 meminfo + loadavg + vmstat 三个文件 (原为 3 次 fork)。
+# 输出 17 个字段: 内存 8 + 负载 6 + 换页/OOM 3
+# 任一文件缺失时对应字段退化为 0, 与原先各函数的兜底行为一致。
+system_read() {
+    awk '
+    FNR == 1 { f = FILENAME; sub(/^.*\//, "", f) }
+    f == "meminfo" {
+        if ($1 == "MemTotal:") t = $2
+        else if ($1 == "MemFree:") fr = $2
+        else if ($1 == "MemAvailable:") a = $2
+        else if ($1 == "Buffers:") b = $2
+        else if ($1 == "Cached:") c = $2
+        else if ($1 == "SReclaimable:") sr = $2
+        else if ($1 == "Shmem:") sh = $2
+        else if ($1 == "Dirty:") d = $2
+        else if ($1 == "Writeback:") wb = $2
+        else if ($1 == "SwapTotal:") st = $2
+        else if ($1 == "SwapFree:") sf = $2
+        next
+    }
+    f == "loadavg" {
+        if (!ldone) {
+            split($4, la, "/")
+            l1 = $1 + 0; l5 = $2 + 0; l15 = $3 + 0
+            run = la[1] + 0; tot = la[2] + 0; lpid = $5 + 0
+            ldone = 1
+        }
+        next
+    }
+    f == "vmstat" {
+        if ($1 == "pswpin") pi = $2
+        else if ($1 == "pswpout") po = $2
+        else if ($1 == "oom_kill") ok = $2
+        next
+    }
+    END {
+        if (a == "") a = fr + b + c
+        cache = c + sr - sh
+        if (cache < 0) cache = 0
+        used = t - a; if (used < 0) used = 0
+        printf "%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n",
+            t * 1024, used * 1024, st * 1024, (st - sf) * 1024,
+            cache * 1024, d * 1024, wb * 1024, a * 1024,
+            l1 + 0, l5 + 0, l15 + 0, run + 0, tot + 0, lpid + 0,
+            pi + 0, po + 0, ok + 0
+    }' "$PROC_ROOT/meminfo" "$PROC_ROOT/loadavg" "$PROC_ROOT/vmstat" 2>/dev/null
+}
+
 
 read_core_count() {
     local n
@@ -561,8 +644,21 @@ iface_ip() {
 #===============================================================================
 # 8. 采集层 — TCP / UDP / 协议栈
 #===============================================================================
-tcp_scan() {
-    cat "$PROC_ROOT/net/tcp" "$PROC_ROOT/net/tcp6" 2>/dev/null | awk '
+# 一次 awk 同时解析 tcp / tcp6 / udp / udp6。
+# 原为 tcp_scan(2 fork) + udp_count(2 fork) 共 4 次 fork, 现为 1 次。
+# 输出标记行: STAT / PEER / PORT / UDPN
+conn_scan() {
+    # 只把实际存在的文件传给 awk。
+    # gawk 遇到打不开的文件会致命退出且不执行 END 块, 那样连 TCP 统计
+    # 也会一起丢失 —— 原实现用 cat 2>/dev/null | awk 因而没有这个问题。
+    local _f
+    set --
+    for _f in tcp tcp6 udp udp6; do
+        [ -r "$PROC_ROOT/net/$_f" ] || continue
+        set -- "$@" "$PROC_ROOT/net/$_f"
+    done
+    [ "$#" -gt 0 ] || return 0
+    awk '
     function h2d(h,   i, c, v, s) {
         s = "0123456789ABCDEF"; v = 0; h = toupper(h)
         for (i = 1; i <= length(h); i++) {
@@ -578,7 +674,9 @@ tcp_scan() {
         c = h2d(substr(h, 3, 2)); d = h2d(substr(h, 1, 2))
         return a "." b "." c "." d
     }
+    FNR == 1 { isudp = (FILENAME ~ /udp/) ? 1 : 0 }
     /^[[:space:]]*sl[[:space:]]/ { next }
+    isudp { udpn++; next }
     NF < 4 { next }
     {
         total++
@@ -613,14 +711,8 @@ tcp_scan() {
             usedq[bk] = 1
             printf "PORT %d %s\n", bv, bk
         }
-    }'
-}
-
-udp_count() {
-    cat "$PROC_ROOT/net/udp" "$PROC_ROOT/net/udp6" 2>/dev/null | awk '
-    /^[[:space:]]*sl[[:space:]]/ { next }
-    { n++ }
-    END { print n+0 }'
+        printf "UDPN %d\n", udpn+0
+    }' "$@" 2>/dev/null
 }
 
 read_snmp() {
@@ -978,6 +1070,13 @@ init_paths() {
     ALERT_FILE="$LOG_DIR/alert-$(date +%Y-%m-%d).log"
     TMPD="${TMPDIR:-/tmp}/${PROG}-$$"
     mkdir -p "$TMPD" 2>/dev/null
+    # 非交互命令 (--check / -n / --export / --log 等) 既不进入交互循环也不进
+    # daemon, 若不在此注册清理, 临时目录会永久残留在 /tmp 里不断累积。
+    # 交互模式与 daemon 模式会另行覆盖这些 trap, 并各自负责清理。
+    trap 'rm -rf "${TMPD:-}" 2>/dev/null' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
 }
 
 load_config() {
@@ -1459,12 +1558,23 @@ alert_scan() {
 #===============================================================================
 # 15. 采样
 #===============================================================================
+# 只保留末尾 n 个字段。
+# 原实现用 wc + tr + awk 共 3 次 fork, 且每帧调用 2 次 => 6 次 fork;
+# 改用 bash 内置数组, 零 fork。输入为纯数字空格串, 无 glob 风险。
 trim_hist() {
-    local s="$1" n="$2" cnt
-    cnt=$(printf '%s' "$s" | wc -w 2>/dev/null | tr -d ' ')
-    is_num "${cnt:-}" || cnt=0
-    if [ "$cnt" -le "$n" ]; then printf '%s' "$s"; return; fi
-    printf '%s' "$s" | awk -v n="$n" '{ for (i = NF - n + 1; i <= NF; i++) printf "%s%s", $i, (i < NF ? " " : "") }'
+    local s="$1" n="$2"
+    local arr cnt start i out=""
+    arr=($s)
+    cnt=${#arr[@]}
+    if [ "$cnt" -le "$n" ]; then printf '%s' "$s"; return 0; fi
+    start=$(( cnt - n ))
+    i=$start
+    while [ "$i" -lt "$cnt" ]; do
+        out="${out}${out:+ }${arr[$i]}"
+        i=$(( i + 1 ))
+    done
+    printf '%s' "$out"
+    return 0
 }
 
 sample_prime() {
@@ -1489,9 +1599,10 @@ sample_prime() {
     cat "$PROC_ROOT"/[0-9]*/stat 2>/dev/null | proc_snapshot_line > "$TMPD/procs.prev" 2>/dev/null
 }
 
+# now 可由调用方传入 (dispatch_frames 已读取), 避免重复 fork。
 sample_fast() {
-    local now dt cur curc dt_num
-    now=$(read_uptime)
+    local now="${1:-}" dt cur curc dt_num
+    [ -n "$now" ] || now=$(read_uptime)
     is_num "${now%%.*}" || now=0
     if ! is_num "${PREV_UPTIME%%.*}"; then
         PREV_UPTIME=$now
@@ -1505,26 +1616,30 @@ sample_fast() {
     PREV_CPU=$cur
     is_num "${CV_CPU_TOTAL%%.*}" || CV_CPU_TOTAL=0
 
-    curc=$(read_cpu_cores)
-    CV_CORES=$(cpu_cores_delta "$curc" "$PREV_CPU_CORES")
-    PREV_CPU_CORES=$curc
+    # 每核视图默认不展开, 仅在需要时计算 (省 2 次 fork/帧)。
+    # 基准仍沿用 sample_prime 建立的值 —— cpu_cores_delta 算的是比例,
+    # 与基准的时间跨度无关, 因此首次展开即可得到正确结果。
+    if [ "$SHOW_CORES" = "1" ]; then
+        curc=$(read_cpu_cores)
+        CV_CORES=$(cpu_cores_delta "$curc" "$PREV_CPU_CORES")
+        PREV_CPU_CORES=$curc
+    fi
 
-    read -r CV_MEM_TOTAL CV_MEM_USED CV_SWAP_TOTAL CV_SWAP_USED CV_MEM_CACHE CV_MEM_DIRTY CV_MEM_WB CV_MEM_AVAIL <<< "$(read_mem)"
+    # meminfo / loadavg / vmstat 一次读完 (原为 3 次 fork)
+    local pgi pgo oom sysr
+    sysr=$(system_read)
+    read -r CV_MEM_TOTAL CV_MEM_USED CV_SWAP_TOTAL CV_SWAP_USED CV_MEM_CACHE CV_MEM_DIRTY CV_MEM_WB CV_MEM_AVAIL \
+            CV_LOAD1 CV_LOAD5 CV_LOAD15 CV_RUNNING CV_TOTPROC CV_LASTPID pgi pgo oom <<< "$sysr"
     is_num "${CV_MEM_TOTAL:-}" || CV_MEM_TOTAL=0
     is_num "${CV_MEM_USED:-}" || CV_MEM_USED=0
     is_num "${CV_SWAP_TOTAL:-}" || CV_SWAP_TOTAL=0
     is_num "${CV_SWAP_USED:-}" || CV_SWAP_USED=0
-
-    read -r CV_LOAD1 CV_LOAD5 CV_LOAD15 CV_RUNNING CV_TOTPROC _ <<< "$(read_loadavg)"
-
-    local pgi pgo oom
-    read -r pgi pgo oom <<< "$(read_vmstat)"
     is_num "${pgi:-}" || pgi=0
     is_num "${pgo:-}" || pgo=0
     is_num "${oom:-}" || oom=0
     CV_OOM=$oom
-    CV_PG_IN=$(awk -v n="$pgi" -v p="$PREV_PG_IN" -v pg="$PAGESIZE" -v d="$dt" 'BEGIN{ v=(n-p)*pg/d; if(v<0)v=0; printf "%.0f", v }')
-    CV_PG_OUT=$(awk -v n="$pgo" -v p="$PREV_PG_OUT" -v pg="$PAGESIZE" -v d="$dt" 'BEGIN{ v=(n-p)*pg/d; if(v<0)v=0; printf "%.0f", v }')
+    # 两次速率计算合并为一次 awk (省 1 次 fork)
+    read -r CV_PG_IN CV_PG_OUT <<< "$(awk -v n1="$pgi" -v p1="$PREV_PG_IN" -v n2="$pgo" -v p2="$PREV_PG_OUT" -v pg="$PAGESIZE" -v d="$dt" 'BEGIN{ v=(n1-p1)*pg/d; if(v<0)v=0; w=(n2-p2)*pg/d; if(w<0)w=0; printf "%.0f %.0f", v, w }')"
     PREV_PG_IN=$pgi; PREV_PG_OUT=$pgo
 
     local rx tx re te rd td
@@ -1532,8 +1647,8 @@ sample_fast() {
     is_num "${rx:-}" || rx=0
     is_num "${tx:-}" || tx=0
     CV_RX_TOTAL=$rx; CV_TX_TOTAL=$tx
-    CV_RX_RATE=$(awk -v n="$rx" -v p="$PREV_RX" -v d="$dt" 'BEGIN{ v=(n-p)/d; if(v<0)v=0; printf "%.0f", v }')
-    CV_TX_RATE=$(awk -v n="$tx" -v p="$PREV_TX" -v d="$dt" 'BEGIN{ v=(n-p)/d; if(v<0)v=0; printf "%.0f", v }')
+    # 两次速率计算合并为一次 awk (省 1 次 fork)
+    read -r CV_RX_RATE CV_TX_RATE <<< "$(awk -v n1="$rx" -v p1="$PREV_RX" -v n2="$tx" -v p2="$PREV_TX" -v d="$dt" 'BEGIN{ v=(n1-p1)/d; if(v<0)v=0; w=(n2-p2)/d; if(w<0)w=0; printf "%.0f %.0f", v, w }')"
     CV_NET_DOWN_INC=$(( rx - PREV_RX )); [ "$CV_NET_DOWN_INC" -lt 0 ] && CV_NET_DOWN_INC=0
     CV_NET_UP_INC=$(( tx - PREV_TX ));   [ "$CV_NET_UP_INC" -lt 0 ] && CV_NET_UP_INC=0
     CV_RXERR=$(( re - PREV_RXERR )); [ "$CV_RXERR" -lt 0 ] && CV_RXERR=0
@@ -1551,6 +1666,7 @@ sample_fast() {
     NET_HIST_TX=$(trim_hist "$NET_HIST_TX" 120)
 
     local tag a b c d e f g h i j k peers="" ports=""
+    local udpn=0
     while read -r tag a b c d e f g h i j k; do
         case "$tag" in
             STAT)
@@ -1560,13 +1676,14 @@ sample_fast() {
                 ;;
             PEER) peers="${peers}${peers:+, }${a} ← ${b}" ;;
             PORT) ports="${ports}${ports:+ }${b}" ;;
+            UDPN) udpn=$a ;;
         esac
-    done < <(tcp_scan)
+    done < <(conn_scan)
     CV_TCP_PEERS="$peers"
     CV_TCP_PORTS="$ports"
     is_num "${CV_TCP_TOTAL:-}" || CV_TCP_TOTAL=0
 
-    CV_UDP_TOTAL=$(udp_count)
+    CV_UDP_TOTAL=$udpn
     is_num "${CV_UDP_TOTAL:-}" || CV_UDP_TOTAL=0
     PREV_UPTIME=$now
     return 0
@@ -1642,17 +1759,19 @@ sample_slow() {
 }
 
 dispatch_frames() {
-    local now
+    local now now_cs
     now=$(read_uptime)
     is_num "${now%%.*}" || now=0
     T_FAST=$now
-    sample_fast
-    local dtm
-    dtm=$(awk -v n="$now" -v p="$T_MID" 'BEGIN{printf "%.1f", n-p}')
-    if [ "${dtm%%.*}" -ge 10 ] 2>/dev/null; then T_MID=$now; sample_mid; fi
-    local dts
-    dts=$(awk -v n="$now" -v p="$T_SLOW" 'BEGIN{printf "%.1f", n-p}')
-    if [ "${dts%%.*}" -ge 60 ] 2>/dev/null; then T_SLOW=$now; sample_slow; fi
+    sample_fast "$now"
+    # 帧间隔判定改用 bash 厘秒整数, 省 2 次 fork/帧
+    now_cs=$(u2cs "$now")
+    if [ $(( now_cs - $(u2cs "$T_MID") )) -ge 1000 ] 2>/dev/null; then
+        T_MID=$now; sample_mid
+    fi
+    if [ $(( now_cs - $(u2cs "$T_SLOW") )) -ge 6000 ] 2>/dev/null; then
+        T_SLOW=$now; sample_slow
+    fi
     return 0
 }
 
@@ -1928,6 +2047,9 @@ EOF
         cmd = ""
         if (NF >= 8) { for (i = 8; i <= NF; i++) cmd = cmd (i > 8 ? "|" : "") $i }
         if (cmd == "") cmd = $6
+        # 注: 这里按字节截断。在 mawk (字节语义) 下若命令行含 4 字节字符
+        # (如 emoji) 且超出宽度, 末尾可能残留半个字符。POSIX awk 取不到
+        # 字节值, 无法可靠判断字符边界, 故保持现状并在文档中说明。
         if (wid > 8 && length(cmd) > wid) cmd = substr(cmd, 1, wid)
         sc = dim
         if ($4 == "R") sc = gr
@@ -2121,7 +2243,12 @@ interactive_loop() {
         fi
     done
     leave_screen
-    trap - EXIT INT TERM HUP
+    # 不要把 trap 清空 —— 一旦清空, 本函数用的临时目录将永久残留。
+    # 重置为"仅清理目录"的兜底版本即可 (交互期间由 cleanup_all 负责)。
+    trap 'rm -rf "${TMPD:-}" 2>/dev/null' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
     return 0
 }
 
@@ -2205,7 +2332,7 @@ start_daemon() {
     fi
     mkdir -p "${PID_FILE%/*}" 2>/dev/null
     echo $$ > "$PID_FILE" 2>/dev/null
-    trap 'rm -f "$PID_FILE" 2>/dev/null; exit 0' INT TERM EXIT
+    trap 'rm -f "$PID_FILE" 2>/dev/null; rm -rf "${TMPD:-}" 2>/dev/null; exit 0' INT TERM EXIT
     printf '%s %s\n' "${T_DAEMON_READY:-后台采集已启动, 日志目录:}" "$LOG_DIR"
     daemon_loop
     return 0
@@ -2230,6 +2357,33 @@ need_root() {
     return 0
 }
 
+# 把脚本自身安装到 BIN_PATH。
+# 脚本已在目标位置时直接返回成功 —— cp 同一文件会报
+# "are the same file" 并返回非 0, 会被误判为写入失败。
+# 返回 0 成功; 1 失败 (原因已打印到 stderr)
+install_self() {
+    local self="$1"
+    [ -n "$self" ] || return 1
+    if [ "$BIN_PATH" -ef "$self" ] 2>/dev/null; then
+        return 0
+    fi
+    # 目标被运行中的进程占用时覆盖会失败, 先给出可操作的提示
+    if [ -f "$BIN_PATH" ] && command -v fuser >/dev/null 2>&1 && \
+       fuser "$BIN_PATH" >/dev/null 2>&1; then
+        printf '%s\n' "错误: $BIN_PATH 正被占用, 请先停止服务: sudo $PROG --stop" >&2
+        return 1
+    fi
+    if ! cp "$self" "$BIN_PATH" 2>/dev/null; then
+        if [ ! -w "${BIN_PATH%/*}" ]; then
+            printf '%s\n' "错误: 目录不可写 (${BIN_PATH%/*}), 需要 root 权限" >&2
+        else
+            printf '%s\n' "错误: 无法写入 $BIN_PATH (磁盘已满或文件系统只读)" >&2
+        fi
+        return 1
+    fi
+    return 0
+}
+
 do_install() {
     need_root "--install" || return 1
     local self
@@ -2239,7 +2393,12 @@ do_install() {
         return 1
     fi
     mkdir -p /usr/local/bin 2>/dev/null
-    cp "$self" "$BIN_PATH" 2>/dev/null || { printf '%s\n' "错误: 无法写入 $BIN_PATH" >&2; return 1; }
+    install_self "$self" || return 1
+    if [ "$BIN_PATH" -ef "$self" ] 2>/dev/null; then
+        printf '提示: %s 已是当前文件, 无需重复安装\n' "$BIN_PATH"
+    else
+        printf '已安装: %s\n' "$BIN_PATH"
+    fi
     chmod 755 "$BIN_PATH" 2>/dev/null
 
     mkdir -p "$CONFIG_DIR" /var/lib/htop-s "$LOG_DIR" 2>/dev/null
@@ -2247,7 +2406,7 @@ do_install() {
         {
             printf '# htop-s 配置\n'
             printf 'iface=%s\n' "${IFACE_LIST%% *}"
-            printf 'interval=2\n'
+            printf 'interval=5\n'
             printf 'quota=%s\n' "${ST_QUOTA:-0}"
             printf 'reset_day=%s\n' "${ST_RESET_DAY:-1}"
             printf 'keep_days=30\n'
@@ -2348,9 +2507,13 @@ do_upgrade() {
         printf '%s\n' "错误: 新版本语法检查未通过, 已中止升级" >&2
         return 1
     fi
-    [ -f "$BIN_PATH" ] && cp "$BIN_PATH" "$BIN_PATH.bak" 2>/dev/null
-    cp "$self" "$BIN_PATH" 2>/dev/null || { printf '%s\n' "错误: 覆盖失败" >&2; return 1; }
-    chmod 755 "$BIN_PATH" 2>/dev/null
+    if [ "$BIN_PATH" -ef "$self" ] 2>/dev/null; then
+        printf '提示: %s 已是当前文件, 无需升级\n' "$BIN_PATH"
+    else
+        [ -f "$BIN_PATH" ] && cp "$BIN_PATH" "$BIN_PATH.bak" 2>/dev/null
+        install_self "$self" || return 1
+        chmod 755 "$BIN_PATH" 2>/dev/null
+    fi
     if [ "$HAS_SYSTEMCTL" = "1" ] && [ -f "$SERVICE_FILE" ]; then
         systemctl daemon-reload 2>/dev/null
         systemctl restart htop-s.service 2>/dev/null
@@ -2799,7 +2962,7 @@ do_check() {
 
     if [ -r "$PROC_ROOT/net/tcp" ]; then
         local t
-        t=$(tcp_scan | awk 'NR == 1 { print $2 }')
+        t=$(conn_scan | awk 'NR == 1 { print $2 }')
         chk "TCP 采集" "$PROC_ROOT/net/tcp" "OK" "$t 个连接"
     else
         chk "TCP 采集" "缺失" "FAIL" ""
@@ -2893,7 +3056,7 @@ do_selftest() {
     self=$(resolve_self)
     if [ -r "$self" ]; then
         # 扫描时排除含 HT_S_SCAN 标记的清单行本身, 以及纯注释行
-        for targets in 'declare -A' 'mapfile' 'readarray' '\$\{[A-Za-z_][A-Za-z0-9_]*\^\^\}' '\$\{[A-Za-z_][A-Za-z0-9_]*,,}' '&>>' 'date +%s%N' 'local -n'; do # HT_S_SCAN
+        for targets in 'declare -A' 'mapfile' 'readarray' '\$\{[A-Za-z_][A-Za-z0-9_]*\^\^\}' '\$\{[A-Za-z_][A-Za-z0-9_]*,,}' '&>>' 'date +%s%N' 'local -n' '[A-Za-z_][A-Za-z0-9_]*\[[^]]+\]\[' ; do # HT_S_SCAN
             hits=$(grep -nE -- "$targets" "$self" 2>/dev/null | grep -v 'HT_S_SCAN' | grep -vE '^[0-9]+:[[:space:]]*#')
             [ -n "$hits" ] && found="${found}${found:+, }${targets}"
         done
@@ -2967,6 +3130,13 @@ do_selftest() {
     assert_eq "不足宽度不补位" "3" "$(printf '%s' "$sp" | wc -c | tr -d ' ')"
     sp=$(sparkline "" 10 10)
     assert_eq "空输入" "0" "$(printf '%s' "$sp" | wc -c | tr -d ' ')"
+
+    # 非 ASCII 模式下每个曲线字符必须完整输出。
+    # 8 个字符 × 3 字节 = 24 字节; 若 awk 按【字节】索引 substr (mawk),
+    # 只会取到 8 个孤立的字节 => 8 字节, 并产出非法 UTF-8。
+    USE_ASCII=0
+    sp=$(sparkline "0 1 2 3 4 5 6 7" 8 7)
+    assert_eq "非ASCII 输出完整字符(24字节)" "24" "$(printf '%s' "$sp" | wc -c | tr -d ' ')"
     USE_ASCII=$oldascii
 
     # 7. TCP 解析 (构造测试夹具)
@@ -2983,7 +3153,7 @@ TCPEOF
     local saved_proc="$PROC_ROOT"
     PROC_ROOT="$mnet"
     local tcpout stat line
-    tcpout=$(tcp_scan)
+    tcpout=$(conn_scan)
     stat=$(printf '%s\n' "$tcpout" | awk '$1 == "STAT" {print $2, $3, $4, $5, $11}')
     assert_eq "总数/EST/SYN/SYN_RECV/LISTEN" "4 2 0 0 2" "$stat"
     line=$(printf '%s\n' "$tcpout" | awk '$1 == "PEER" {print $3; exit}')
@@ -3153,7 +3323,7 @@ htop-s — Linux 服务器实时监控终端面板 (htop 风格)
   htop-s [选项] [命令]
 
 运行与显示:
-  (无参数)              进入实时面板 (默认 2 秒刷新)
+  (无参数)              进入实时面板 (默认 5 秒刷新)
   -i N, --interval N    刷新间隔 N 秒 (1~30)
   -I IF, --iface IF     监控网卡, 支持逗号分隔多网卡 (如 eth0,eth1)
   -e, --en              英文界面

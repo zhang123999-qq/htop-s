@@ -81,7 +81,7 @@ scp htop-s user@server:/tmp/ && ssh user@server 'chmod +x /tmp/htop-s && /tmp/ht
 ```bash
 htop-s --check-update            # 看看有没有新版本
 sudo htop-s --update             # 从 Release 拉取最新版并重启服务
-sudo htop-s --update=0.0.2       # 更新到指定版本
+sudo htop-s --update=0.0.3       # 更新到指定版本
 sudo htop-s --update --force     # 版本相同时也强制重装
 
 sudo htop-s --uninstall          # 移除服务与脚本, 保留日志与流量数据

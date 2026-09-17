@@ -967,7 +967,7 @@ printf '%s' "$ALERT_TEXT" | eval "$NOTIFY_CMD"
 
 | 命令 | 说明 |
 |---|---|
-| `htop-s` | 进入实时面板（默认，2 秒刷新） |
+| `htop-s` | 进入实时面板（默认，5 秒刷新） |
 | `htop-s -i N` | 刷新间隔 N 秒（1~30） |
 | `htop-s -I eth0[,eth1]` | 指定网卡，支持多网卡逗号分隔求和 |
 | `htop-s -e` | 英文界面 |
@@ -1198,7 +1198,7 @@ scp htop-s.new root@server:/tmp/htop-s && ssh root@server /tmp/htop-s --upgrade
 
 | 项 | 标准 |
 |---|---|
-| 面板刷新 | 2 秒间隔下 CPU/带宽数值连续变化，无卡顿无闪烁 |
+| 面板刷新 | 5 秒间隔下 CPU/带宽数值连续变化，无卡顿无闪烁 |
 | 配额统计 | 手动设置 `--quota 1G`，用 `dd` 传输 500MB，面板显示涨幅误差 < 2% |
 | 跨重启（nft） | 重启服务器，本期累计流量不减少 |
 | 跨重启（proc） | 重启服务器，面板显示"数据不完整"标记 |
@@ -1213,9 +1213,9 @@ scp htop-s.new root@server:/tmp/htop-s && ssh root@server /tmp/htop-s --upgrade
 
 | 场景 | 目标 |
 |---|---|
-| 空闲机器，2 秒刷新 | 单帧渲染 < 80ms，CPU 占用 < 1% |
-| 1000 连接，2 秒刷新 | 单帧渲染 < 120ms |
-| 10000 连接，2 秒刷新 | 单帧渲染 < 250ms |
+| 空闲机器，5 秒刷新 | 单帧合计 < 120ms（采集约 70ms + 渲染约 48ms），CPU 占用 < 1% |
+| 1000 连接，5 秒刷新 | 单帧合计 < 130ms |
+| 10000 连接，5 秒刷新 | 单帧合计 < 250ms |
 | 常驻内存 | 面板 < 8MB，daemon < 4MB |
 | 长跑 7 天 | 内存无增长（RSS 波动 < 10%），无僵尸子进程 |
 
@@ -1393,14 +1393,14 @@ https://github.com/<owner>/<repo>/releases/latest/download/<asset>
 
 ```bash
 # 1. 改版本号
-$EDITOR htop-s              # VERSION="0.0.2"
+$EDITOR htop-s              # VERSION="0.0.3"
 
 # 2. 自测
 htop-s --selftest              # 内置 50 项, 任何环境都能跑
 bash tests/run-tests.sh        # 本地开发环境专用; tests/ 不随仓库分发
 
 # 3. 提交
-git add -A && git commit -m "htop-s 0.0.2"
+git add -A && git commit -m "htop-s 0.0.3"
 git push origin main
 
 # 4. 构建产物
@@ -1410,12 +1410,12 @@ chmod +x dist/htop-s dist/install.sh
 (cd dist && sha256sum htop-s install.sh > htop-s.sha256)
 
 # 5. 打 tag
-git tag -a v0.0.2 -m "htop-s 0.0.2"
-git push origin v0.0.2
+git tag -a v0.0.3 -m "htop-s 0.0.3"
+git push origin v0.0.3
 
 # 6. 发布
-gh release create v0.0.2 dist/htop-s dist/install.sh dist/htop-s.sha256 \
-  --title "v0.0.2" --notes-file dist/notes.md
+gh release create v0.0.3 dist/htop-s dist/install.sh dist/htop-s.sha256 \
+  --title "v0.0.3" --notes-file dist/notes.md
 
 # 7. 验证线上可下
 curl -fsSL -x http://127.0.0.1:10808 \

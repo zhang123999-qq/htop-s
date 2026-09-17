@@ -23,6 +23,8 @@ tests/
 #     位于仓库根目录而非 tests/ 下, 因此需单独列出
 htop-s-自测报告.md
 htop-s-真实环境测试报告.md
+htop-s-修复报告-v0.0.3.md
+htop-s-渲染性能分析.md
 
 # 1.3 根目录散落的测试脚本 —— 防止以后随手新建时漏掉
 #     覆盖 test-foo.sh / foo-test.sh / test_foo.sh / foo_test.sh / foo.test.sh

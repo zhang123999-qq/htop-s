@@ -337,7 +337,7 @@ UDP  37  InErr 0 · RcvbufErr 0
 
 | 命令 | 说明 |
 |---|---|
-| `htop-s` | 进入实时面板（默认 2 秒刷新） |
+| `htop-s` | 进入实时面板（默认 5 秒刷新） |
 | `htop-s -i 5` | 改成 5 秒刷新（范围 1~30） |
 | `htop-s -I eth0` | 指定监控网卡 |
 | `htop-s -I eth0,eth1` | 多网卡合并统计 |
@@ -785,7 +785,7 @@ sudo htop-s --restart
 
 不会。设计上有三重保障：
 
-1. 分帧调度：每 2 秒只算该算的，磁盘容量这种慢指标 60 秒才算一次
+1. 分帧调度：每 5 秒只算该算的，磁盘容量这种慢指标 60 秒才算一次
 2. 一次采样批量解析：不反复 fork 外部命令
 3. 系统安装时限制了资源上限（最多 10% 单核、64MB 内存）
 
@@ -826,7 +826,7 @@ nohup htop-s --daemon >/dev/null 2>&1 &
 ```bash
 htop-s --check-update        # 只检查, 不安装
 sudo htop-s --update         # 更新到最新版
-sudo htop-s --update=0.0.2   # 更新到指定版本
+sudo htop-s --update=0.0.3   # 更新到指定版本
 sudo htop-s --update --force # 版本相同也强制重装
 ```
 
