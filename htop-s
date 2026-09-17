@@ -248,6 +248,22 @@ term_height() {
     TERM_ROWS=$h
 }
 
+# 挑选临时目录: 尊重 TMPDIR, 但必须以"实际写入"验证可用; 否则退回标准路径
+pick_tmp() {
+    local d t
+    for d in "${TMPDIR:-}" /tmp /var/tmp .; do
+        [ -n "$d" ] || continue
+        [ -d "$d" ] || continue
+        t="${d%/}/${PROG}.wtest.$$"
+        if (umask 077; : > "$t") 2>/dev/null; then
+            rm -f "$t" 2>/dev/null
+            printf '%s' "${d%/}"
+            return 0
+        fi
+    done
+    printf '%s' "."
+}
+
 is_num() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 
 #===============================================================================
@@ -3253,6 +3269,8 @@ main() {
 }
 
 
+#========
+#========
 #===============================================================================
 # 24b. 版本管理与在线更新
 #
@@ -3260,6 +3278,22 @@ main() {
 #       因此这里允许使用 curl 或 wget (缺失时只影响本模块, 不影响监控)。
 #       代理优先级: --proxy 参数 > 配置文件 proxy= > 环境变量 > 无代理
 #===============================================================================
+# 挑选临时目录: 尊重 TMPDIR, 但必须以"实际写入"验证可用; 否则退回标准路径
+pick_tmp() {
+    local d t
+    for d in "${TMPDIR:-}" /tmp /var/tmp .; do
+        [ -n "$d" ] || continue
+        [ -d "$d" ] || continue
+        t="${d%/}/${PROG}.wtest.$$"
+        if (umask 077; : > "$t") 2>/dev/null; then
+            rm -f "$t" 2>/dev/null
+            printf '%s' "${d%/}"
+            return 0
+        fi
+    done
+    printf '%s' "."
+}
+
 repo_base() { printf 'https://github.com/%s/%s' "$REPO_OWNER" "$REPO_NAME"; }
 api_base()  { printf 'https://api.github.com/repos/%s/%s' "$REPO_OWNER" "$REPO_NAME"; }
 
@@ -3301,7 +3335,7 @@ version_newer() {
 
 latest_version() {
     local tmp v
-    tmp="${TMPDIR:-/tmp}/${PROG}.rel.$$"
+    tmp="$(pick_tmp)/${PROG}.rel.$$"
     if ! http_fetch "$(api_base)/releases/latest" "$tmp"; then
         rm -f "$tmp" 2>/dev/null
         return 1
@@ -3365,7 +3399,7 @@ do_update() {
     fi
 
     url="$(repo_base)/releases/download/v${want}/${PROG}"
-    tmp="${TMPDIR:-/tmp}/${PROG}.new.$$"
+    tmp="$(pick_tmp)/${PROG}.new.$$"
     printf '%s\n' "正在下载 v$want ..."
     printf '%s\n' "  $url"
     if ! http_fetch "$url" "$tmp"; then

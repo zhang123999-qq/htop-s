@@ -56,6 +56,34 @@ htop-s --check
 
 ## 2. 三种部署方式
 
+### 2.0 一键安装（最快）
+
+```bash
+# 装到 /usr/local/bin
+curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash
+
+# 顺带装好开机自启
+curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- --service
+
+# 指定版本 / 走代理
+curl -fsSL -x http://127.0.0.1:10808 https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.1
+```
+
+安装器会依次做五件事：环境检查（Linux / bash 版本 / 下载工具）→ 准备目录 →
+下载程序 → 校验（语法 + 版本号 + sha256）→ 安装。任何一步失败都会中止且不留下半成品。
+
+可用选项：
+
+| 选项 | 说明 |
+|---|---|
+| `-v, --version VER` | 安装指定版本，默认取最新 Release |
+| `--prefix DIR` | 安装目录，默认 `/usr/local/bin` |
+| `--service` | 安装后立即启动开机自启服务 |
+| `--proxy URL` | 下载走代理，如 `http://127.0.0.1:10808` |
+| `--no-verify` | 跳过 sha256 校验 |
+
+> 注：`--service` 需要 root；非 root 运行时会自动跳过并提示手动后台运行的方法。
+
 ### 2.1 裸部署（推荐，不需要 root）
 
 ```bash
@@ -792,6 +820,37 @@ nohup htop-s --daemon >/dev/null 2>&1 &
 想让它跟着容器主进程起，把它加进 entrypoint 脚本即可。
 
 ---
+
+## 11.5 在线更新
+
+```bash
+htop-s --check-update        # 只检查, 不安装
+sudo htop-s --update         # 更新到最新版
+sudo htop-s --update=0.0.2   # 更新到指定版本
+sudo htop-s --update --force # 版本相同也强制重装
+```
+
+更新过程：查最新版本 → 下载 `releases/download/vX.Y.Z/htop-s` → 语法校验 →
+比对文件内 `VERSION` 是否与请求版本一致 → 备份旧版到 `/usr/local/bin/htop-s.bak`
+→ 覆盖 → 若装了 systemd 服务则自动重启。
+
+**任何一步不通过都不会覆盖现有文件**，所以不会把能用的版本换成坏的。
+
+如果服务器在受限网络下，先把代理设一次，之后 `--check-update` / `--update` 都会自动带上：
+
+```bash
+htop-s --proxy http://127.0.0.1:10808
+htop-s --proxy none                 # 清除
+```
+
+代理只影响下载，监控功能完全不受影响。
+
+### 更新没成功怎么回滚
+
+```bash
+sudo cp /usr/local/bin/htop-s.bak /usr/local/bin/htop-s
+sudo systemctl restart htop-s 2>/dev/null
+```
 
 ## 12. 卸载
 

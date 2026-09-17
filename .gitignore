@@ -16,3 +16,4 @@ htop-s.v1.bak
 *.log
 *.pid
 *.tmp.*
+dist/

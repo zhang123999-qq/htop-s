@@ -40,6 +40,54 @@ chmod +x /usr/local/bin/htop-s && htop-s
 
 ---
 
+## 安装
+
+### 一键安装（推荐）
+
+```bash
+# 装到 /usr/local/bin
+curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash
+
+# 顺带装好开机自启
+curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- --service
+
+# 指定版本
+curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.1
+
+# 国内网络走代理
+curl -fsSL -x http://127.0.0.1:10808 https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash
+```
+
+`releases/latest/download/` 是 GitHub 的固定入口，永远指向最新版，命令不用改。
+
+### 最简形式（只取一个文件）
+
+```bash
+sudo curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/htop-s -o /usr/local/bin/htop-s
+sudo chmod +x /usr/local/bin/htop-s
+htop-s
+```
+
+### 手动部署（不需要 root）
+
+```bash
+scp htop-s user@server:/tmp/ && ssh user@server 'chmod +x /tmp/htop-s && /tmp/htop-s'
+```
+
+### 更新与卸载
+
+```bash
+htop-s --check-update            # 看看有没有新版本
+sudo htop-s --update             # 从 Release 拉取最新版并重启服务
+sudo htop-s --update=0.0.2       # 更新到指定版本
+sudo htop-s --update --force     # 版本相同时也强制重装
+
+sudo htop-s --uninstall          # 移除服务与脚本, 保留日志与流量数据
+sudo htop-s --uninstall --purge  # 彻底清理
+```
+
+自更新有三重保护：下载后先做语法校验 → 再比对文件内版本号 → 通过才覆盖，且先备份 `.bak`。
+
 ## 快速上手
 
 ```bash

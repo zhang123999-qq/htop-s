@@ -1325,3 +1325,105 @@ lang=zh
 ```
 
 优先级：**命令行参数 > 环境变量 > 配置文件 > 内置默认**。
+
+---
+
+## 18. 发布与分发
+
+### 18.1 仓库配置
+
+| 项 | 值 |
+|---|---|
+| 仓库 | `zhang123999-qq/htop-s` |
+| 可见性 | **Public**（必须——curl 匿名拉取 Release 资源要求公开） |
+| License | MIT |
+| Topics | linux monitoring bash htop terminal tui devops sysadmin tcp netstat shell-script server |
+| 默认分支 | `main` |
+
+### 18.2 版本号规则
+
+采用语义化版本 `MAJOR.MINOR.PATCH`，**脚本内不带 `v`，Git tag 带 `v`**：
+
+- 脚本 `VERSION="0.0.1"` ↔ tag `v0.0.1`
+- 版本比较在 `version_newer()` 中按三段数值比较，不要引入带后缀的版本（如 `0.0.1-beta`）
+  —— 现有实现只解析三段数字，遇到后缀会被 `+0` 吞掉
+
+不吹版本号：0.0.x 表示「功能完整但未在真实生产环境长期验证」，等实际跑过一段时间再进 0.1。
+
+### 18.3 Release 产物
+
+每次发版上传三个 asset，**文件名必须严格一致**（下载 URL 直接由文件名拼出）：
+
+| Asset | 说明 |
+|---|---|
+| `htop-s` | 主脚本，需带可执行位 |
+| `install.sh` | 一键安装器 |
+| `htop-s.sha256` | `sha256sum htop-s install.sh` 的输出 |
+
+`install.sh` 会用 `${URL}.sha256` 去取校验和，所以校验和文件名必须是 `htop-s.sha256`。
+
+### 18.4 固定下载入口
+
+GitHub 提供永不变化的重定向入口，因此文档里可以写死一条命令：
+
+```
+https://github.com/<owner>/<repo>/releases/latest/download/<asset>
+```
+
+它永远指向最新 Release；指定版本时用
+`https://github.com/<owner>/<repo>/releases/download/v<VER>/<asset>`。
+
+### 18.5 发版流程
+
+```bash
+# 1. 改版本号
+$EDITOR htop-s              # VERSION="0.0.2"
+
+# 2. 自测
+htop-s --selftest
+bash tests/run-tests.sh
+
+# 3. 提交
+git add -A && git commit -m "htop-s 0.0.2"
+git push origin main
+
+# 4. 构建产物
+rm -rf dist && mkdir dist
+cp htop-s dist/htop-s && cp install.sh dist/install.sh
+chmod +x dist/htop-s dist/install.sh
+(cd dist && sha256sum htop-s install.sh > htop-s.sha256)
+
+# 5. 打 tag
+git tag -a v0.0.2 -m "htop-s 0.0.2"
+git push origin v0.0.2
+
+# 6. 发布
+gh release create v0.0.2 dist/htop-s dist/install.sh dist/htop-s.sha256 \
+  --title "v0.0.2" --notes-file dist/notes.md
+
+# 7. 验证线上可下
+curl -fsSL -x http://127.0.0.1:10808 \
+  https://github.com/zhang123999-qq/htop-s/releases/latest/download/htop-s | head -1
+```
+
+### 18.6 代理
+
+网络受限环境下，git / gh / curl 都走同一个代理：
+
+```bash
+export https_proxy=http://127.0.0.1:10808
+export http_proxy=http://127.0.0.1:10808
+```
+
+脚本内的下载代理是独立配置项（`--proxy` / 配置文件的 `proxy=`），
+优先级：`--proxy` 参数 > 配置文件 > 环境变量 > 无代理。
+
+### 18.7 更新链路的三重保护
+
+`--update` 在覆盖前必须依次通过：
+
+1. `bash -n` 语法校验
+2. 文件内 `VERSION` 必须与请求版本一致
+3. 覆盖前备份为 `$BIN_PATH.bak`
+
+任一环节失败即中止，**绝不在校验未通过时覆盖现有文件**。

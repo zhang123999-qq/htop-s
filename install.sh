@@ -34,6 +34,22 @@ human_size() {
     else printf '%dB' "$n"; fi
 }
 
+# 挑选临时目录: 尊重 TMPDIR, 但必须以"实际写入"验证可用; 否则退回标准路径
+pick_tmp() {
+    local d t
+    for d in "${TMPDIR:-}" /tmp /var/tmp .; do
+        [ -n "$d" ] || continue
+        [ -d "$d" ] || continue
+        t="${d%/}/${PROG}.wtest.$$"
+        if (umask 077; : > "$t") 2>/dev/null; then
+            rm -f "$t" 2>/dev/null
+            printf '%s' "${d%/}"
+            return 0
+        fi
+    done
+    printf '%s' "."
+}
+
 die()  { printf '\033[31m错误: %s\033[0m\n' "$1" >&2; exit 1; }
 info() { printf '  %s\n' "$1"; }
 ok()   { printf '\033[32m  %s\033[0m\n' "$1"; }
@@ -160,7 +176,7 @@ fi
 # 3. 下载
 #-------------------------------------------------------------------------------
 printf '\n3/5 下载程序\n'
-TMP="${TMPDIR:-/tmp}/${PROG}.install.$$"
+TMP="$(pick_tmp)/${PROG}.install.$$"
 if [ -n "$WANT_VER" ]; then
     URL="$BASE/releases/download/v${WANT_VER}/${PROG}"
     info "版本: v$WANT_VER (指定)"
@@ -201,7 +217,7 @@ fi
 ok "版本: v$GOT_VER"
 
 if [ "$NO_VERIFY" != "1" ] && command -v sha256sum >/dev/null 2>&1; then
-    SUMPROG="${TMPDIR:-/tmp}/${PROG}.sum.$$"
+    SUMPROG="$(pick_tmp)/${PROG}.sum.$$"
     SUMURL="${URL}.sha256"
     if fetch "$SUMURL" "$SUMPROG" && [ -s "$SUMPROG" ]; then
         WANT_SUM=$(awk '{print $1}' "$SUMPROG" 2>/dev/null | head -1)
