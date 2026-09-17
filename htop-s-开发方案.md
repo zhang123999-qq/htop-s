@@ -1,7 +1,7 @@
 # htop-s 开发方案
 
 > Linux 服务器实时监控终端面板 · 开发规格说明书
-> 规格版本：v2.0　|　实现版本：v0.0.3　|　状态：已实现并发布　|　更新：2026-09-17
+> 规格版本：v2.0　|　实现版本：v0.0.4　|　状态：已实现并发布　|　更新：2026-09-17
 
 ---
 
@@ -1365,7 +1365,7 @@ lang=zh
 
 采用语义化版本 `MAJOR.MINOR.PATCH`，**脚本内不带 `v`，Git tag 带 `v`**：
 
-- 脚本 `VERSION="0.0.3"` ↔ tag `v0.0.3`
+- 脚本 `VERSION="0.0.4"` ↔ tag `v0.0.4`
 - 版本比较在 `version_newer()` 中按三段数值比较，不要引入带后缀的版本（如 `0.0.3-beta`）
   —— 现有实现只解析三段数字，遇到后缀会被 `+0` 吞掉
 
@@ -1382,7 +1382,7 @@ lang=zh
 | 2 | **示例版本** | `README.md` 安装示例 `-v X.Y.Z`<br>`htop-s-使用手册.md` 安装示例<br>`install.sh` 用法示例与错误提示 | **应改**为最新可用版 |
 | 3 | **规格版本** | `htop-s-开发方案.md` 头部 `规格版本：v2.0` | **不改** —— 这是规格文档自身版本，外部引用（如「开发方案 v2.0」）依赖它 |
 | 4 | **历史版本** | `htop-s-真实环境测试报告.md`（v0.0.2，当时测试对象）<br>`htop-s-修复报告-v0.0.3.md`（版本对比）<br>`htop-s-渲染性能分析.md`（升级提示）<br>`.workbuddy/memory/*`（工作日志） | **禁止改** —— 改了就是篡改历史结论 |
-| 5 | **文件名版本** | `htop-s-修复报告-v0.0.3.md`<br>`.build/notes-v0.0.3.md`<br>`.gitignore` 中对上述文件的引用 | 随文件重命名同步 |
+| 5 | **文件名版本** | `htop-s-修复报告-v0.0.3.md`<br>`.build/notes-v0.0.4.md`<br>`.gitignore` 中对上述文件的引用 | 随文件重命名同步 |
 
 **易漏点**：文件头注释 `# 版本: X.Y.Z` 与 `VERSION=` 变量是**两处独立声明**。
 2026-09-17 核查时发现它们长期不一致（注释停在 `2.0.0`，变量已是 `0.0.3`），
@@ -1455,8 +1455,8 @@ chmod +x dist/htop-s dist/install.sh
 (cd dist && sha256sum htop-s install.sh > htop-s.sha256)
 
 # 5. 打 tag
-git tag -a v0.0.3 -m "htop-s 0.0.3"
-git push origin v0.0.3
+git tag -a v0.0.4 -m "htop-s 0.0.4"
+git push origin v0.0.4
 
 # 6. 发布
 gh release create v0.0.3 dist/htop-s dist/install.sh dist/htop-s.sha256 \

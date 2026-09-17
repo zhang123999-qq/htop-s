@@ -1,7 +1,7 @@
 # htop-s 使用手册
 
 > Linux 服务器实时监控终端面板 · 部署 / 指令 / 排错
-> 版本：0.0.3　|　适用：Debian / Ubuntu / CentOS / Rocky / Alma / Alpine
+> 版本：0.0.4　|　适用：Debian / Ubuntu / CentOS / Rocky / Alma / Alpine
 
 ---
 
@@ -66,7 +66,7 @@ curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/ins
 curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- --service
 
 # 指定版本 / 走代理
-curl -fsSL -x http://127.0.0.1:10808 https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.3
+curl -fsSL -x http://127.0.0.1:10808 https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.4
 ```
 
 安装器会依次做五件事：环境检查（Linux / bash 版本 / 下载工具）→ 准备目录 →
@@ -826,7 +826,7 @@ nohup htop-s --daemon >/dev/null 2>&1 &
 ```bash
 htop-s --check-update        # 只检查, 不安装
 sudo htop-s --update         # 更新到最新版
-sudo htop-s --update=0.0.3   # 更新到指定版本
+sudo htop-s --update=0.0.4   # 更新到指定版本
 sudo htop-s --update --force # 版本相同也强制重装
 ```
 

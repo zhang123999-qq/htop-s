@@ -68,7 +68,7 @@ curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/ins
 curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- --service
 
 # 指定版本
-curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.3
+curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.4
 
 # 国内网络走代理
 curl -fsSL -x http://127.0.0.1:10808 https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash
@@ -95,7 +95,7 @@ scp htop-s user@server:/tmp/ && ssh user@server 'chmod +x /tmp/htop-s && /tmp/ht
 ```bash
 htop-s --check-update            # 看看有没有新版本
 sudo htop-s --update             # 从 Release 拉取最新版并重启服务
-sudo htop-s --update=0.0.3       # 更新到指定版本
+sudo htop-s --update=0.0.4       # 更新到指定版本
 sudo htop-s --update --force     # 版本相同时也强制重装
 
 sudo htop-s --uninstall          # 移除服务与脚本, 保留日志与流量数据
@@ -178,7 +178,7 @@ HT_S_PROC=tests/mock/proc HT_S_ROOT=tests/mock/sys HT_S_ETC=tests/mock/etc \
   PATH=tests/mock/bin:$PATH bash htop-s -n
 ```
 
-内置自测（含 bash 3.2 兼容性静态扫描、i18n 变量完整性、单位换算、日期算术、CPU 差分、TCP 小端序解析、默认网关解码、进程排序键 n/i 等 **50 项**）：
+内置自测（含 bash 3.2 兼容性静态扫描、i18n 变量完整性、单位换算、日期算术、CPU 差分、TCP 小端序解析、默认网关解码、进程排序键 n/i 等 **51 项**）：
 
 ```bash
 htop-s --selftest

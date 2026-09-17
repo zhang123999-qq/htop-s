@@ -2,7 +2,7 @@
 #===============================================================================
 # htop-s — Linux 服务器实时监控终端面板
 #
-# 版本: 0.0.3
+# 版本: 0.0.4
 # 依赖: bash >= 3.2, awk (POSIX), coreutils
 # 数据: 全部来自 /proc 与 /sys, 不使用 ss/netstat/ps/free/iostat
 #
@@ -17,7 +17,7 @@
 
 set -u
 
-VERSION="0.0.3"
+VERSION="0.0.4"
 PROG="htop-s"
 
 #===============================================================================
@@ -73,6 +73,7 @@ PREV_RX=0; PREV_TX=0; PREV_RXERR=0; PREV_TXERR=0; PREV_RXDROP=0; PREV_TXDROP=0
 PREV_DSK_RD=0; PREV_DSK_WR=0; PREV_DSK_RC=0; PREV_DSK_WC=0; PREV_DSK_IOT=0
 PREV_PG_IN=0; PREV_PG_OUT=0
 PREV_SEG_IN=0; PREV_SEG_OUT=0; PREV_SEG_RET=0; PREV_UDP_ERR=0; PREV_UDP_BUF=0
+PREV_SYN_RET=0; SYN_RET_INIT=0
 
 T_FAST=0; T_MID=0; T_SLOW=0
 LAST_DATE=""
@@ -98,6 +99,7 @@ CV_TCP_PORTS=""
 
 MV_DISK_RD=0; MV_DISK_WR=0; MV_DISK_IOPS=0; MV_DISK_UTIL=0
 MV_RETRANS=0; MV_LIS_OVF=0; MV_LIS_DROP=0; MV_SYN_RET=0; MV_SYNCOOKIE=0
+MV_SYN_RET_INC=0
 MV_TW_OVF=0; MV_UDP_INERR=0; MV_UDP_RCVBUF=0
 MV_CONNTRACK=0; MV_CONNTRACK_MAX=0
 MV_PROCS=""; MV_PORTS=""; MV_PORTS_ON=0
@@ -365,6 +367,44 @@ sparkline() {
             s = s sc[idx]
         }
         print s
+    }'
+}
+
+# 一次算出两条 sparkline 曲线, 以 | 分隔返回 —— 合并两次 fork 为一次。
+# 分隔符必须用 | 而非空格: ASCII 模式下最低档字符本身就是空格,
+# 用空格分隔时 read 会按 IFS 折叠, 导致两条曲线错位。
+sparkline2() {
+    local d1="$1" d2="$2" width="$3" max="$4"
+    awk -v d1="$d1" -v d2="$d2" -v w="$width" -v mx="$max" -v asc="$USE_ASCII" '
+    BEGIN {
+        if (asc == 1) {
+            sc[1] = " "; sc[2] = "."; sc[3] = ":"; sc[4] = "-"
+            sc[5] = "="; sc[6] = "+"; sc[7] = "*"; sc[8] = "@"
+        } else {
+            sc[1] = "▁"; sc[2] = "▂"; sc[3] = "▃"; sc[4] = "▄"
+            sc[5] = "▅"; sc[6] = "▆"; sc[7] = "▇"; sc[8] = "█"
+        }
+        if (mx <= 0) mx = 1
+        o1 = ""; o2 = ""
+        n = split(d1, a, " ")
+        if (n > 0 && w >= 1) {
+            st = n - w + 1; if (st < 1) st = 1
+            for (i = st; i <= n; i++) {
+                v = a[i] + 0; idx = int(v / mx * 7) + 1
+                if (idx > 8) idx = 8; if (idx < 1) idx = 1
+                o1 = o1 sc[idx]
+            }
+        }
+        n = split(d2, b, " ")
+        if (n > 0 && w >= 1) {
+            st = n - w + 1; if (st < 1) st = 1
+            for (i = st; i <= n; i++) {
+                v = b[i] + 0; idx = int(v / mx * 7) + 1
+                if (idx > 8) idx = 8; if (idx < 1) idx = 1
+                o2 = o2 sc[idx]
+            }
+        }
+        printf "%s|%s\n", o1, o2
     }'
 }
 
@@ -1463,17 +1503,41 @@ alert_scan() {
     local f_cpu f_mem f_swap f_disk f_inode f_load f_syn f_tw f_cw
     local f_lovf f_rt f_sret f_ct f_nic f_udpe f_oom f_dst f_q80 f_q100
 
-    mempct=$(awk -v u="$CV_MEM_USED" -v t="$CV_MEM_TOTAL" 'BEGIN{ printf "%.1f", (t>0)?u/t*100:0 }')
-    if [ "${CV_SWAP_TOTAL:-0}" -gt 0 ] 2>/dev/null; then
-        swappct=$(awk -v u="$CV_SWAP_USED" -v t="$CV_SWAP_TOTAL" 'BEGIN{ printf "%.1f", (t>0)?u/t*100:0 }')
-    fi
-    dmax=$(printf '%s\n' "$SV_DISK" | awk 'NF { p = $1 + 0; if (p > m) m = p } END { print m+0 }')
-    imax=$(printf '%s' "${SV_INODE:-0|}" | awk -F'|' '{ print $1 + 0 }')
-    if [ "${MV_CONNTRACK_MAX:-0}" -gt 0 ] 2>/dev/null; then
-        ctpct=$(awk -v c="$MV_CONNTRACK" -v m="$MV_CONNTRACK_MAX" 'BEGIN{ printf "%.0f", c/m*100 }')
-    fi
-    dn=$(printf '%s\n' "$MV_PROCS" | awk -F'|' '$4 == "D" { n++ } END { print n+0 }')
-    loadn=$(awk -v l="$CV_LOAD1" -v c="$SV_CORES_N" 'BEGIN{ printf "%.2f", (c>0)?l/c:0 }')
+    # 4 个纯算术指标合并为一次 awk 调用 (原为 4 次 fork)。
+    # 保留 awk 而非改用 bash 整数运算: 输出含 %.1f/%.2f 格式化,
+    # bash 整数除法无法精确复现 C 库 printf 的舍入
+    # (边界样本 6.25 会得到 6.3 而非 6.2)。
+    read -r mempct swappct ctpct loadn <<< "$(awk \
+        -v mu="$CV_MEM_USED" -v mt="$CV_MEM_TOTAL" \
+        -v su="$CV_SWAP_USED" -v st="$CV_SWAP_TOTAL" \
+        -v cc="$MV_CONNTRACK" -v cm="$MV_CONNTRACK_MAX" \
+        -v l="$CV_LOAD1" -v cn="$SV_CORES_N" '
+        BEGIN {
+            printf "%.1f %.1f %.0f %.2f",
+                (mt>0)?mu/mt*100:0, (st>0)?su/st*100:0,
+                (cm>0)?cc/cm*100:0, (cn>0)?l/cn:0
+        }')"
+    is_num "${ctpct:-}" || ctpct=0
+    # 以下三处原为 `printf | awk`, 每处 1 次 fork。
+    # bash 内联循环等价且零 fork —— SV_DISK 行数 = 磁盘挂载点数 (通常 <10),
+    # MV_PROCS 行数 = TOP N (默认 8), 数据量都很小, 循环开销可忽略。
+    dmax=0
+    while IFS= read -r _dl; do
+        [ -n "$_dl" ] || continue
+        _dp="${_dl%%|*}"; _dp="${_dp%%.*}"
+        is_num "${_dp:-}" || continue
+        [ "$_dp" -gt "$dmax" ] && dmax=$_dp
+    done <<EOF
+$SV_DISK
+EOF
+    imax="${SV_INODE:-0|}"; imax="${imax%%|*}"
+    is_num "${imax:-}" || imax=0
+    dn=0
+    while IFS='|' read -r _pc _pm _pp _ps _pt _pn; do
+        [ "$_ps" = "D" ] && dn=$(( dn + 1 ))
+    done <<EOF
+$MV_PROCS
+EOF
 
     is_num "${dmax:-}" || dmax=0
     is_num "${imax:-}" || imax=0
@@ -1486,7 +1550,7 @@ alert_scan() {
         -v cpu="$CV_CPU_TOTAL" -v mem="$mempct" -v swp="$swappct" -v pgout="$CV_PG_OUT" \
         -v dsk="$dmax" -v ino="$imax" -v ld="$loadn" \
         -v syn="$CV_TCP_SYN" -v tw="$CV_TCP_TW" -v cw="$CV_TCP_CW" \
-        -v lovf="$MV_LIS_OVF" -v rt="$MV_RETRANS" -v sret="$MV_SYN_RET" \
+        -v lovf="$MV_LIS_OVF" -v rt="$MV_RETRANS" -v sret="$MV_SYN_RET_INC" \
         -v ct="$ctpct" -v nic="$(( CV_RXERR + CV_TXERR + CV_RXDROP + CV_TXDROP ))" \
         -v udpe="$(( MV_UDP_INERR + MV_UDP_RCVBUF ))" -v oom="$CV_OOM" \
         -v dst="$dn" -v qp="$CV_QUOTA_PCT" '
@@ -1504,7 +1568,7 @@ alert_scan() {
             (n(cw) >= 500),
             (n(lovf) >= 1),
             (n(rt) >= 5),
-            (n(sret) >= 20),
+            (n(sret) >= 10),
             (n(ct) >= 80),
             (n(nic) >= 1),
             (n(udpe) >= 1),
@@ -1528,7 +1592,7 @@ alert_scan() {
     alert_eval closewait   "$CV_TCP_CW"     500  WARN 3 "CLOSE_WAIT 堆积, 应用可能未关闭连接" "${f_cw:-0}"
     alert_eval listen_drop "$MV_LIS_OVF"    1    WARN 3 "accept 队列溢出 ListenOverflows" "${f_lovf:-0}"
     alert_eval retrans     "$MV_RETRANS"    5    WARN 3 "TCP 重传率过高"               "${f_rt:-0}"
-    alert_eval syn_retrans "$MV_SYN_RET"    20   WARN 3 "SYN 重传数过高"               "${f_sret:-0}"
+    alert_eval syn_retrans "$MV_SYN_RET_INC" 10  WARN 3 "SYN 重传激增 (本周期新增)"       "${f_sret:-0}"
     alert_eval conntrack   "$ctpct"         80   CRIT 1 "conntrack 表接近上限"          "${f_ct:-0}"
     alert_eval nic_err     "$(( CV_RXERR + CV_TXERR + CV_RXDROP + CV_TXDROP ))" 1 WARN 3 "网卡错误或丢包增长" "${f_nic:-0}"
     alert_eval udp_err     "$(( MV_UDP_INERR + MV_UDP_RCVBUF ))" 1 WARN 3 "UDP 收包错误" "${f_udpe:-0}"
@@ -1716,6 +1780,17 @@ sample_mid() {
     PREV_UDP_ERR=$ue; PREV_UDP_BUF=$ub
 
     read -r MV_LIS_OVF MV_LIS_DROP MV_SYN_RET MV_TW_OVF MV_SYNCOOKIE <<< "$(read_netstat_ext)"
+    # SYN 重传: /proc/net/netstat 的 TCPSynRetrans 是开机以来的累计计数器,
+    # 直接拿它与阈值比较必然误报 —— 任何运行时间稍长的机器累计值都远超阈值
+    # (实测一台运行 3 天的机器该值为 60 万)。故改为按本帧增量判定:
+    # 首轮只建立基准不告警, 之后每帧取差值; 计数器归零(重启)时按 0 处理。
+    is_num "${MV_SYN_RET:-}" || MV_SYN_RET=0
+    if [ "${SYN_RET_INIT:-0}" = "1" ]; then
+        MV_SYN_RET_INC=$(( MV_SYN_RET - PREV_SYN_RET ))
+        [ "$MV_SYN_RET_INC" -lt 0 ] && MV_SYN_RET_INC=0
+    fi
+    PREV_SYN_RET=$MV_SYN_RET
+    SYN_RET_INIT=1
     read -r MV_CONNTRACK MV_CONNTRACK_MAX <<< "$(read_conntrack)"
     is_num "${MV_CONNTRACK:-}" || MV_CONNTRACK=0
     is_num "${MV_CONNTRACK_MAX:-}" || MV_CONNTRACK_MAX=0
@@ -1835,11 +1910,25 @@ render() {
     local HB_PRX HB_PTX HB_QT HB_ETA
     local BA_CPU BA_MEM BA_SW BA_Q BA_D1 BA_D2
     local PC_CPU PC_MEM PC_Q PC_D1 PC_D2 PC_IN
-    local mempct swappct
+    local mempct swappct ctpct
+
+    # 4 个纯算术指标 (负载/核、内存%、交换%、conntrack%) 合并为一次 awk 调用:
+    # 原为 4 次 fork, 现 1 次。此处刻意保留 awk 而不用 bash 整数运算 ——
+    # 输出含 %.1f/%.2f 格式化, bash 整数除法无法精确复现 C 库 printf 的舍入,
+    # 会导致显示值出现 0.1 级漂移 (边界样本 6.25 -> awk 得 "6.2", 整数法得 "6.3")。
+    read -r loadn mempct swappct ctpct <<< "$(awk \
+        -v l="$CV_LOAD1" -v cn="$SV_CORES_N" \
+        -v mu="$CV_MEM_USED" -v mt="$CV_MEM_TOTAL" \
+        -v su="$CV_SWAP_USED" -v st="$CV_SWAP_TOTAL" \
+        -v cc="$MV_CONNTRACK" -v cm="$MV_CONNTRACK_MAX" '
+        BEGIN {
+            printf "%.2f %.1f %.1f %.0f",
+                (cn>0)?l/cn:0, (mt>0)?mu/mt*100:0,
+                (st>0)?su/st*100:0, (cm>0)?cc/cm*100:0
+        }')"
 
     now=$(date '+%Y-%m-%d %H:%M:%S')
     up=$(fmt_uptime "$SV_UPTIME")
-    loadn=$(awk -v l="$CV_LOAD1" -v c="$SV_CORES_N" 'BEGIN{ printf "%.2f", (c>0)?l/c:0 }')
     IFACE_MAIN="${IFACE_LIST%% *}"
     [ -z "$IFACE_MAIN" ] && IFACE_MAIN="eth0"
 
@@ -1860,8 +1949,6 @@ render() {
     hb_to    HB_PRX  "$CV_PERIOD_RX";     hb_to HB_PTX "$CV_PERIOD_TX"
     hb_to    HB_QT   "$ST_QUOTA";         hb_to HB_ETA "$CV_QUOTA_ETA"
     pc_to    PC_CPU  "$CV_CPU_TOTAL";     bar_to BA_CPU "$CV_CPU_TOTAL" "$bw"
-    mempct=$(awk -v u="$CV_MEM_USED" -v t="$CV_MEM_TOTAL" 'BEGIN{ printf "%.1f", (t>0)?u/t*100:0 }')
-    swappct=$(awk -v u="$CV_SWAP_USED" -v t="$CV_SWAP_TOTAL" 'BEGIN{ printf "%.1f", (t>0)?u/t*100:0 }')
     pc_to    PC_MEM  "$mempct";           bar_to BA_MEM "$mempct" "$bw"
     pc_to    PC_Q    "$CV_QUOTA_PCT";     bar_to BA_Q "$CV_QUOTA_PCT" 10
 
@@ -1945,8 +2032,8 @@ EOF
     # ---- 磁盘 IO (紧凑模式隐藏) ----
     if [ "$COMPACT" != "1" ]; then
     local imax imnt
-    imax=$(printf '%s' "${SV_INODE:-0|}" | awk -F'|' '{print $1+0}')
-    imnt=$(printf '%s' "${SV_INODE:-0|}" | awk -F'|' '{print $2}')
+    # SV_INODE 格式为 "最大inode使用率|挂载点", 直接切分即可, 无需 fork awk
+    imax="${SV_INODE:-0|}"; imnt="${imax#*|}"; imax="${imax%%|*}"
     is_num "${imax:-}" || imax=0
     pc_to PC_IN "$imax"
     line="  ${C_BOLD}${T_DISKIO}${C_RESET}  ${C_DIM}${T_INODE}${C_RESET} ${PC_IN}${imax}%${C_RESET} ${C_DIM}${imnt}${C_RESET}"
@@ -1982,12 +2069,18 @@ EOF
     p_line "$line"
 
     # ---- 带宽曲线 ----
-    local hmax
-    hmax=$(printf '%s' "$NET_HIST_RX $NET_HIST_TX" | awk '{ for (i = 1; i <= NF; i++) if ($i + 0 > m) m = $i + 0; print m + 0 }')
-    is_num "${hmax:-}" || hmax=0
+    # NET_HIST_* 是空格分隔的整数字节序列 (长度 = 历史窗口), bash 循环零 fork
+    local hmax=0 _hv _hi
+    for _hv in $NET_HIST_RX $NET_HIST_TX; do
+        _hi="${_hv%%.*}"
+        is_num "${_hi:-}" || continue
+        [ "$_hi" -gt "$hmax" ] && hmax=$_hi
+    done
     [ "$hmax" -lt 65536 ] && hmax=65536
-    p_line "  ${C_GREEN}↓${C_RESET} ${C_GREEN}$(sparkline "$NET_HIST_RX" "$(( W - 6 ))" "$hmax")${C_RESET}"
-    p_line "  ${C_MAGENTA}↑${C_RESET} ${C_MAGENTA}$(sparkline "$NET_HIST_TX" "$(( W - 6 ))" "$hmax")${C_RESET}"
+    # 两条曲线合并为一次 awk 调用 (原为 2 次 fork)。
+    IFS='|' read -r SP_RX SP_TX <<< "$(sparkline2 "$NET_HIST_RX" "$NET_HIST_TX" "$(( W - 6 ))" "$hmax")"
+    p_line "  ${C_GREEN}↓${C_RESET} ${C_GREEN}${SP_RX}${C_RESET}"
+    p_line "  ${C_MAGENTA}↑${C_RESET} ${C_MAGENTA}${SP_TX}${C_RESET}"
     p_line "$HR_LINE"
 
     # ---- TCP ----
@@ -2001,9 +2094,8 @@ EOF
     line="${line}  ${C_DIM}${T_LISTEN} ${CV_TCP_LISTEN}${C_RESET}"
     p_line "$line"
 
-    local ctpct=0
-    [ "${MV_CONNTRACK_MAX:-0}" -gt 0 ] 2>/dev/null && \
-        ctpct=$(awk -v c="$MV_CONNTRACK" -v m="$MV_CONNTRACK_MAX" 'BEGIN{ printf "%.0f", c/m*100 }')
+    # ctpct 已在 render 开头与其他算术指标一并算出 (原来在此单独 fork 一次 awk);
+    # 注意此处不能再用 local ctpct=0 声明, 否则会把已算好的值重置。
     if [ "${MV_RETRANS:-0}" != "0" ] 2>/dev/null; then rtc="$C_YELLOW"; else rtc="$C_DIM"; fi
     p_line "  ${C_DIM}${T_RETRANS}${C_RESET} ${rtc}${MV_RETRANS}%${C_RESET}  ${C_DIM}${T_OVERFLOW} ${MV_LIS_OVF}  ListenDrop ${MV_LIS_DROP}  SYN${T_RETRANS} ${MV_SYN_RET}  conntrack ${MV_CONNTRACK}/${MV_CONNTRACK_MAX} (${ctpct}%)${C_RESET}"
 
@@ -2035,10 +2127,21 @@ EOF
     if [ "$CV_PROC_MODE" = "n" ] || [ "$CV_PROC_MODE" = "i" ]; then
         if [ "$CV_PROC_MODE" = "n" ]; then hdr_met="CONN"; else hdr_met="IO"; fi
         p_line "  ${C_BOLD}${T_TOPCPU}${C_RESET}  ${C_DIM}[${hdr_met}]${C_RESET}"
-        p_line "${C_DIM}  $(printf '%7s %8s %8s %7s %5s  %-4s %s' "$T_PID" "$hdr_met" "$T_CPU" "$T_MEMCOL" "$T_THR" "$T_ST" "$T_CMD")${C_RESET}"
+        # 表头内容在 i18n 初始化后不再变化, 用 printf -v 预计算并缓存。
+        # 原写法 ${C_DIM} $(printf ...) ${C_RESET} 中 printf 虽是内置命令,
+        # 但 $( ) 仍会 fork 一个子 shell —— 每帧白白付两次。
+        if [ -z "${HDR_NI:-}" ]; then
+            printf -v HDR_NI '%7s %8s %8s %7s %5s  %-4s %s' \
+                "$T_PID" "$hdr_met" "$T_CPU" "$T_MEMCOL" "$T_THR" "$T_ST" "$T_CMD"
+        fi
+        p_line "${C_DIM}  ${HDR_NI}${C_RESET}"
     else
         p_line "  ${C_BOLD}${T_TOPCPU}${C_RESET}"
-        p_line "${C_DIM}  $(printf '%7s %8s %7s %5s  %-4s %s' "$T_PID" "$T_CPU" "$T_MEMCOL" "$T_THR" "$T_ST" "$T_CMD")${C_RESET}"
+        if [ -z "${HDR_STD:-}" ]; then
+            printf -v HDR_STD '%7s %8s %7s %5s  %-4s %s' \
+                "$T_PID" "$T_CPU" "$T_MEMCOL" "$T_THR" "$T_ST" "$T_CMD"
+        fi
+        p_line "${C_DIM}  ${HDR_STD}${C_RESET}"
     fi
     printf '%s\n' "$MV_PROCS" | awk -F'|' \
         -v dim="$C_DIM" -v rs="$C_RESET" -v gr="$C_GREEN" -v rd="$C_RED" -v yl="$C_YELLOW" \
@@ -2061,7 +2164,13 @@ EOF
         if (tty == 1) printf "\033[K"
         printf "\n"
     }'
-    dstate=$(printf '%s\n' "$MV_PROCS" | awk -F'|' '$4 == "D" { n++ } END { print n+0 }')
+    # MV_PROCS 最多 10 行, bash 循环零 fork; 字段序 cpu|mem|pid|state|thr|...
+    dstate=0
+    while IFS='|' read -r _qc _qm _qp _qs _qt _qn; do
+        [ "$_qs" = "D" ] && dstate=$(( dstate + 1 ))
+    done <<EOF
+$MV_PROCS
+EOF
     is_num "${dstate:-}" || dstate=0
     if [ "$dstate" -gt 0 ]; then
         p_line "  ${C_RED}${T_DSTATE} (${dstate})${C_RESET}"
@@ -2072,7 +2181,7 @@ EOF
     p_line "$HR_LINE"
     local alertn=0
     if [ -n "${ALERT_FILE:-}" ] && [ -f "$ALERT_FILE" ]; then
-        alertn=$(wc -l < "$ALERT_FILE" 2>/dev/null | tr -d ' ')
+        alertn=$(grep -c '' "$ALERT_FILE" 2>/dev/null)
         is_num "${alertn:-}" || alertn=0
     fi
     if [ "$alertn" -gt 0 ]; then ac="$C_RED"; else ac="$C_DIM"; fi

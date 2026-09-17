@@ -72,16 +72,16 @@ htop-s 一键安装脚本
 
 示例:
   # 最简: 装到 /usr/local/bin
-  curl -fsSL https://github.com/REPO/releases/latest/download/install.sh | sudo bash
+  curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash
 
   # 装好并开启开机自启
-  curl -fsSL https://github.com/REPO/releases/latest/download/install.sh | sudo bash -s -- --service
+  curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- --service
 
   # 指定版本
-  curl -fsSL https://github.com/REPO/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.3
+  curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.4
 
   # 国内网络走代理
-  curl -fsSL -x http://127.0.0.1:10808 https://github.com/REPO/releases/latest/download/install.sh | sudo bash
+  curl -fsSL -x http://127.0.0.1:10808 https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash
 EOF
     exit 0
 }
@@ -89,7 +89,7 @@ EOF
 while [ $# -gt 0 ]; do
     case "$1" in
         -v|--version)
-            [ $# -ge 2 ] || die "-v 需要一个版本号, 例: -v 0.0.3"
+            [ $# -ge 2 ] || die "-v 需要一个版本号, 例: -v 0.0.4"
             WANT_VER="${2#v}"; shift 2 ;;
         --version=*) WANT_VER="${1#*=}"; WANT_VER="${WANT_VER#v}"; shift ;;
         --prefix)
