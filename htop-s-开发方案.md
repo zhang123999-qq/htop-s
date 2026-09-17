@@ -1,7 +1,7 @@
 # htop-s 开发方案
 
 > Linux 服务器实时监控终端面板 · 开发规格说明书
-> 规格版本：v2.0　|　实现版本：v0.0.4　|　状态：已实现并发布　|　更新：2026-09-17
+> 规格版本：v2.0　|　实现版本：v0.0.5　|　状态：已实现并发布　|　更新：2026-09-17
 
 ---
 
@@ -211,15 +211,17 @@ awk -v i="eth0" '$1 == i":" {print $2, $10; exit}' /proc/net/dev
 
 | 帧 | 周期 | 指标 | 理由 |
 |---|---|---|---|
-| **快帧** | 随面板刷新（默认 5s，可调 1~30） | CPU 总/每核/steal、负载、进程数、内存/Swap/换页、上下行带宽、带宽曲线、TCP·UDP 连接与状态分布 | 秒级波动，必须实时 |
+| **快帧** | 随面板刷新（默认 1s，可调 1~30） | CPU 总/每核/steal、负载、进程数、内存/Swap/换页、上下行带宽、带宽曲线、TCP·UDP 连接与状态分布 | 秒级波动，必须实时 |
 | **中帧** | 10s | 磁盘 IO/IOPS、TOP 进程（实时 CPU）、监听端口→进程、conntrack、重传率、半连接队列溢出 | 变化慢，降频无损感知 |
 | **慢帧** | 60s | 磁盘容量/inode、温度、发行版/内核/登录数/僵尸进程、流量配额预估 | 基本不变 |
 | **面板重绘** | 每帧（= 刷新间隔） | 用缓存拼接完整画面 | 保证视觉一致性 |
 
 > **实现说明**：`sample_fast` 在 `dispatch_frames()` 中**每帧无条件执行**，
-> 因此快帧的实际周期等于面板刷新间隔（`INTERVAL`，默认 5 秒）。
+> 因此快帧的实际周期等于面板刷新间隔（`INTERVAL`，默认 1 秒）。
 > 中帧 / 慢帧按上次执行时间判断（≥10s / ≥60s 才跑），与刷新间隔解耦。
-> v0.0.3 起 `INTERVAL` 由 2 秒改为 5 秒，并与 daemon 采集间隔对齐。
+> `INTERVAL` 的演变：v0.0.2 为 2 秒 → v0.0.3 改为 5 秒（与 daemon 采集间隔对齐）→
+> v0.0.5 回到 **1 秒**（面板实时性优先）。daemon 采集间隔 `DAEMON_INTERVAL` 始终为 5 秒，
+> 两者自 v0.0.5 起解耦 —— 改面板刷新不再影响告警判定频率与落盘密度。
 
 ### 5.3 调度器实现
 
@@ -478,7 +480,7 @@ mv -f "$tmp" "$STATE_FILE"     # rename 在 POSIX 文件系统上是原子的
   原子写 state
 ```
 
-**只需保证每次采样都落盘**，两次落盘间隔内的重启最多丢失一个采样周期（默认 5 秒）的流量，可接受。
+**只需保证每次采样都落盘**，两次落盘间隔内的重启最多丢失一个采样周期（默认 5 秒，即 daemon 采集间隔）的流量，可接受。
 
 #### 7.4.2 proc 模式（重启期间丢失）
 
@@ -873,7 +875,7 @@ flock -n 9 || { echo "已在运行"; exit 1; }
 | 切分 | **按天**，文件名 `collect-YYYY-MM-DD.csv` |
 | 格式 | CSV，17 列：`时间,epoch,uptime,cpu%,mem%,swap%,load1,down_bps,up_bps,tcp,udp,disk_rd,disk_wr,rx_err,tx_err,rx_bytes,tx_bytes` |
 | 尾两列 | `rx_bytes` / `tx_bytes` 是**本周期的增量字节数**（不是速率）。有了它，`--today` / `--month` 直接求和即可得到精确流量，不必对速率做积分近似 |
-| 告警判定 | 与采样同频（默认 5 秒），因此"连续 3 次"= 15 秒，与告警示例中的"已持续 15 秒"一致 |
+| 告警判定 | 与采样同频（采集间隔，默认 5 秒），因此"连续 3 次"= 15 秒，与告警示例中的"已持续 15 秒"一致 |
 | 压缩 | 非当日文件用 `gzip` 压缩（若可用），得到 `.csv.gz` |
 | 保留 | 默认 30 天，可配 `--keep N` |
 | 清理 | **每轮循环检查**（旧版仅在启动时检查一次，长跑进程永不轮转） |
@@ -972,7 +974,7 @@ printf '%s' "$ALERT_TEXT" | eval "$NOTIFY_CMD"
 
 | 命令 | 说明 |
 |---|---|
-| `htop-s` | 进入实时面板（默认，5 秒刷新） |
+| `htop-s` | 进入实时面板（默认，1 秒刷新） |
 | `htop-s -i N` | 刷新间隔 N 秒（1~30） |
 | `htop-s -I eth0[,eth1]` | 指定网卡，支持多网卡逗号分隔求和 |
 | `htop-s -e` | 英文界面 |
@@ -1203,7 +1205,7 @@ scp htop-s.new root@server:/tmp/htop-s && ssh root@server /tmp/htop-s --upgrade
 
 | 项 | 标准 |
 |---|---|
-| 面板刷新 | 5 秒间隔下 CPU/带宽数值连续变化，无卡顿无闪烁 |
+| 面板刷新 | 1 秒间隔下 CPU/带宽数值连续变化，无卡顿无闪烁 |
 | 配额统计 | 手动设置 `--quota 1G`，用 `dd` 传输 500MB，面板显示涨幅误差 < 2% |
 | 跨重启（nft） | 重启服务器，本期累计流量不减少 |
 | 跨重启（proc） | 重启服务器，面板显示"数据不完整"标记 |
@@ -1218,9 +1220,11 @@ scp htop-s.new root@server:/tmp/htop-s && ssh root@server /tmp/htop-s --upgrade
 
 | 场景 | 目标 |
 |---|---|
-| 空闲机器，5 秒刷新 | 单帧合计 < 120ms（采集约 70ms + 渲染约 48ms），CPU 占用 < 1% |
-| 1000 连接，5 秒刷新 | 单帧合计 < 130ms |
-| 10000 连接，5 秒刷新 | 单帧合计 < 250ms |
+| 空闲机器，单帧 | 合计 < 120ms（采集约 70ms + 渲染约 48ms） |
+| 空闲机器，1 秒刷新（默认） | 单核占用约 14%、整机（4 核）约 3.4%（实测单帧 CPU 约 140ms） |
+| 空闲机器，5 秒刷新（`-i 5`） | 单核占用约 4.2%、整机约 1.0% |
+| 1000 连接，1 秒刷新 | 单帧合计 < 130ms |
+| 10000 连接，1 秒刷新 | 单帧合计 < 250ms |
 | 常驻内存 | 面板 < 8MB，daemon < 4MB |
 | 长跑 7 天 | 内存无增长（RSS 波动 < 10%），无僵尸子进程 |
 
@@ -1332,7 +1336,7 @@ CPU 占用用面板自身分区反查（自监控）。
 ```
 # htop-s 配置
 iface=eth0
-interval=2
+interval=1
 quota=1024G
 reset_day=1
 keep_days=30
@@ -1365,7 +1369,7 @@ lang=zh
 
 采用语义化版本 `MAJOR.MINOR.PATCH`，**脚本内不带 `v`，Git tag 带 `v`**：
 
-- 脚本 `VERSION="0.0.4"` ↔ tag `v0.0.4`
+- 脚本 `VERSION="0.0.5"` ↔ tag `v0.0.5`
 - 版本比较在 `version_newer()` 中按三段数值比较，不要引入带后缀的版本（如 `0.0.3-beta`）
   —— 现有实现只解析三段数字，遇到后缀会被 `+0` 吞掉
 
@@ -1382,7 +1386,7 @@ lang=zh
 | 2 | **示例版本** | `README.md` 安装示例 `-v X.Y.Z`<br>`htop-s-使用手册.md` 安装示例<br>`install.sh` 用法示例与错误提示 | **应改**为最新可用版 |
 | 3 | **规格版本** | `htop-s-开发方案.md` 头部 `规格版本：v2.0` | **不改** —— 这是规格文档自身版本，外部引用（如「开发方案 v2.0」）依赖它 |
 | 4 | **历史版本** | `htop-s-真实环境测试报告.md`（v0.0.2，当时测试对象）<br>`htop-s-修复报告-v0.0.3.md`（版本对比）<br>`htop-s-渲染性能分析.md`（升级提示）<br>`.workbuddy/memory/*`（工作日志） | **禁止改** —— 改了就是篡改历史结论 |
-| 5 | **文件名版本** | `htop-s-修复报告-v0.0.3.md`<br>`.build/notes-v0.0.4.md`<br>`.gitignore` 中对上述文件的引用 | 随文件重命名同步 |
+| 5 | **文件名版本** | `htop-s-修复报告-v0.0.3.md`<br>`.build/notes-v0.0.5.md`<br>`.gitignore` 中对上述文件的引用 | 随文件重命名同步 |
 
 **易漏点**：文件头注释 `# 版本: X.Y.Z` 与 `VERSION=` 变量是**两处独立声明**。
 2026-09-17 核查时发现它们长期不一致（注释停在 `2.0.0`，变量已是 `0.0.3`），
@@ -1438,14 +1442,14 @@ https://github.com/<owner>/<repo>/releases/latest/download/<asset>
 
 ```bash
 # 1. 改版本号
-$EDITOR htop-s              # VERSION="0.0.3"
+$EDITOR htop-s              # VERSION="0.0.5"
 
 # 2. 自测
-htop-s --selftest              # 内置 50 项, 任何环境都能跑
+htop-s --selftest              # 内置 51 项, 任何环境都能跑
 bash tests/run-tests.sh        # 本地开发环境专用; tests/ 不随仓库分发
 
 # 3. 提交
-git add -A && git commit -m "htop-s 0.0.3"
+git add -A && git commit -m "htop-s 0.0.5"
 git push origin main
 
 # 4. 构建产物
@@ -1455,12 +1459,12 @@ chmod +x dist/htop-s dist/install.sh
 (cd dist && sha256sum htop-s install.sh > htop-s.sha256)
 
 # 5. 打 tag
-git tag -a v0.0.4 -m "htop-s 0.0.4"
-git push origin v0.0.4
+git tag -a v0.0.5 -m "htop-s 0.0.5"
+git push origin v0.0.5
 
 # 6. 发布
-gh release create v0.0.3 dist/htop-s dist/install.sh dist/htop-s.sha256 \
-  --title "v0.0.3" --notes-file dist/notes.md
+gh release create v0.0.5 dist/htop-s dist/install.sh dist/htop-s.sha256 \
+  --title "v0.0.5" --notes-file dist/notes.md
 
 # 7. 验证线上可下
 curl -fsSL -x http://127.0.0.1:10808 \

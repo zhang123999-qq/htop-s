@@ -68,7 +68,7 @@ curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/ins
 curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- --service
 
 # 指定版本
-curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.4
+curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.5
 
 # 国内网络走代理
 curl -fsSL -x http://127.0.0.1:10808 https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash
@@ -95,7 +95,7 @@ scp htop-s user@server:/tmp/ && ssh user@server 'chmod +x /tmp/htop-s && /tmp/ht
 ```bash
 htop-s --check-update            # 看看有没有新版本
 sudo htop-s --update             # 从 Release 拉取最新版并重启服务
-sudo htop-s --update=0.0.4       # 更新到指定版本
+sudo htop-s --update=0.0.5       # 更新到指定版本
 sudo htop-s --update --force     # 版本相同时也强制重装
 
 sudo htop-s --uninstall          # 移除服务与脚本, 保留日志与流量数据
@@ -192,7 +192,7 @@ htop-s --selftest
 ## 设计要点
 
 - **分层**：采集层（`/proc` `/sys`）→ 聚合层（awk 一次算完多键聚合）→ 缓存层（分帧）→ 渲染层（备用屏缓冲）
-- **分帧调度**：秒级指标 2s 刷新，磁盘 IO / TOP 进程 10s，磁盘容量 / 温度 / 系统信息 60s。
+- **分帧调度**：秒级指标随面板刷新（默认 1s），磁盘 IO / TOP 进程 10s，磁盘容量 / 温度 / 系统信息 60s。
   避免「监控脚本自己拖慢服务器」
 - **双进程模型**：面板只读状态文件，daemon 独占写，互不干扰
 - **时钟源**：用 `/proc/uptime`（10ms 精度）而非 `date +%s%N`，busybox 也支持

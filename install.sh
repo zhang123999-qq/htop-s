@@ -78,7 +78,7 @@ htop-s 一键安装脚本
   curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- --service
 
   # 指定版本
-  curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.4
+  curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.5
 
   # 国内网络走代理
   curl -fsSL -x http://127.0.0.1:10808 https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash
@@ -89,7 +89,7 @@ EOF
 while [ $# -gt 0 ]; do
     case "$1" in
         -v|--version)
-            [ $# -ge 2 ] || die "-v 需要一个版本号, 例: -v 0.0.4"
+            [ $# -ge 2 ] || die "-v 需要一个版本号, 例: -v 0.0.5"
             WANT_VER="${2#v}"; shift 2 ;;
         --version=*) WANT_VER="${1#*=}"; WANT_VER="${WANT_VER#v}"; shift ;;
         --prefix)

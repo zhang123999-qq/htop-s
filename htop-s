@@ -2,7 +2,7 @@
 #===============================================================================
 # htop-s — Linux 服务器实时监控终端面板
 #
-# 版本: 0.0.4
+# 版本: 0.0.5
 # 依赖: bash >= 3.2, awk (POSIX), coreutils
 # 数据: 全部来自 /proc 与 /sys, 不使用 ss/netstat/ps/free/iostat
 #
@@ -17,7 +17,7 @@
 
 set -u
 
-VERSION="0.0.4"
+VERSION="0.0.5"
 PROG="htop-s"
 
 #===============================================================================
@@ -30,7 +30,7 @@ ETC_ROOT="${HT_S_ETC:-/etc}"
 #===============================================================================
 # 1. 全局状态 (set -u 要求全部预初始化)
 #===============================================================================
-INTERVAL=5
+INTERVAL=1
 DAEMON_INTERVAL=5
 IFACE_LIST=""
 OUT_LANG="zh"
@@ -2515,7 +2515,8 @@ do_install() {
         {
             printf '# htop-s 配置\n'
             printf 'iface=%s\n' "${IFACE_LIST%% *}"
-            printf 'interval=5\n'
+            printf '# interval: 刷新间隔 (秒, 1~30); 下行显式值会覆盖内置默认值 1\n'
+            printf 'interval=1\n'
             printf 'quota=%s\n' "${ST_QUOTA:-0}"
             printf 'reset_day=%s\n' "${ST_RESET_DAY:-1}"
             printf 'keep_days=30\n'
@@ -3432,7 +3433,7 @@ htop-s — Linux 服务器实时监控终端面板 (htop 风格)
   htop-s [选项] [命令]
 
 运行与显示:
-  (无参数)              进入实时面板 (默认 5 秒刷新)
+  (无参数)              进入实时面板 (默认 1 秒刷新)
   -i N, --interval N    刷新间隔 N 秒 (1~30)
   -I IF, --iface IF     监控网卡, 支持逗号分隔多网卡 (如 eth0,eth1)
   -e, --en              英文界面

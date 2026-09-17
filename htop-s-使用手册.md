@@ -1,7 +1,7 @@
 # htop-s 使用手册
 
 > Linux 服务器实时监控终端面板 · 部署 / 指令 / 排错
-> 版本：0.0.4　|　适用：Debian / Ubuntu / CentOS / Rocky / Alma / Alpine
+> 版本：0.0.5　|　适用：Debian / Ubuntu / CentOS / Rocky / Alma / Alpine
 
 ---
 
@@ -66,7 +66,7 @@ curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/ins
 curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- --service
 
 # 指定版本 / 走代理
-curl -fsSL -x http://127.0.0.1:10808 https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.4
+curl -fsSL -x http://127.0.0.1:10808 https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.5
 ```
 
 安装器会依次做五件事：环境检查（Linux / bash 版本 / 下载工具）→ 准备目录 →
@@ -337,7 +337,7 @@ UDP  37  InErr 0 · RcvbufErr 0
 
 | 命令 | 说明 |
 |---|---|
-| `htop-s` | 进入实时面板（默认 5 秒刷新） |
+| `htop-s` | 进入实时面板（默认 1 秒刷新） |
 | `htop-s -i 5` | 改成 5 秒刷新（范围 1~30） |
 | `htop-s -I eth0` | 指定监控网卡 |
 | `htop-s -I eth0,eth1` | 多网卡合并统计 |
@@ -785,11 +785,18 @@ sudo htop-s --restart
 
 不会。设计上有三重保障：
 
-1. 分帧调度：每 5 秒只算该算的，磁盘容量这种慢指标 60 秒才算一次
+1. 分帧调度：秒级指标随面板刷新（默认 1 秒），磁盘容量这种慢指标 60 秒才算一次
 2. 一次采样批量解析：不反复 fork 外部命令
 3. 系统安装时限制了资源上限（最多 10% 单核、64MB 内存）
 
-实测空闲服务器上占用 < 1% CPU。
+实测（4 核空闲服务器、80×24 终端、单帧 CPU 约 140ms）：
+
+| 刷新间隔 | 单核占用 | 整机占用 |
+|---|---|---|
+| 1 秒（默认） | 约 14% | 约 3.4% |
+| 5 秒（`-i 5`） | 约 4.2% | 约 1.0% |
+
+刷新间隔越小，单位时间采样次数越多，CPU 占用等比上升。按 `-` 键或用 `-i 5` 可把间隔调回 5 秒。
 
 ### Q14. 想把它接到脚本或监控系统里
 
@@ -826,7 +833,7 @@ nohup htop-s --daemon >/dev/null 2>&1 &
 ```bash
 htop-s --check-update        # 只检查, 不安装
 sudo htop-s --update         # 更新到最新版
-sudo htop-s --update=0.0.4   # 更新到指定版本
+sudo htop-s --update=0.0.5   # 更新到指定版本
 sudo htop-s --update --force # 版本相同也强制重装
 ```
 
