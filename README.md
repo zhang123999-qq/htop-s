@@ -68,7 +68,7 @@ curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/ins
 curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- --service
 
 # 指定版本
-curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.5
+curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.6
 
 # 国内网络走代理
 curl -fsSL -x http://127.0.0.1:10808 https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash
@@ -95,7 +95,7 @@ scp htop-s user@server:/tmp/ && ssh user@server 'chmod +x /tmp/htop-s && /tmp/ht
 ```bash
 htop-s --check-update            # 看看有没有新版本
 sudo htop-s --update             # 从 Release 拉取最新版并重启服务
-sudo htop-s --update=0.0.5       # 更新到指定版本
+sudo htop-s --update=0.0.6       # 更新到指定版本
 sudo htop-s --update --force     # 版本相同时也强制重装
 
 sudo htop-s --uninstall          # 移除服务与脚本, 保留日志与流量数据

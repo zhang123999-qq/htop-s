@@ -1,7 +1,7 @@
 # htop-s 开发方案
 
 > Linux 服务器实时监控终端面板 · 开发规格说明书
-> 规格版本：v2.0　|　实现版本：v0.0.5　|　状态：已实现并发布　|　更新：2026-09-17
+> 规格版本：v2.0　|　实现版本：v0.0.6　|　状态：已实现，待发布　|　更新：2026-09-18
 
 ---
 
@@ -51,7 +51,12 @@
 | 数据源 | 自解析 `/proc`，**不用 `ss` / `netstat` / `ps` / `free` / `iostat`** | 性能提升一个数量级 |
 | 流量统计 | **nftables 计数增强**，无 nft 时回退 `/proc/net/dev` | 跨重启不丢流量 |
 | 告警通道 | **只写本地告警日志**，保留 `NOTIFY_CMD` 扩展钩子 | 零依赖但可扩展 |
-| 交付范围 | 一次做到位：面板 + 配额 + 告警 + 日志 + 汇总 | 单文件约 1800~2200 行 |
+| 交付范围 | 一次做到位：面板 + 配额 + 告警 + 日志 + 汇总 | 单文件约 1800~2200 行（**实际 3942 行**，见下方说明） |
+
+> **行数说明**：v0.0.6 实际 3942 行，超出上表 1800~2200 行的初始估算。
+> 超出的主要来源是规划时低估的三块：i18n 中英双语文案、`--check`/`--selftest`
+> 两级自检、以及 `--install`/`--upgrade`/`--update` 三条部署链路的错误处理与降级。
+> 估算值保留在此仅作规划对照，**不代表当前约束**。
 
 ---
 
@@ -408,40 +413,68 @@ nft list table inet htop_s
 
 #### 7.3.2 格式
 
-纯文本 `key=value`，每行一条，便于 awk 解析和人工排查：
+纯文本 `key=value`，每行一条，便于 awk 解析和人工排查。
+**以下为 `state_save()` 实际写出的完整字段集（实测样例）**：
 
 ```
 version=1
-mode=nft                        # nft | proc
-period_start=2026-09-01
-period_reset_day=1              # 1~28，账单日
-quota_bytes=1099511627776       # 月配额，0=不限
-iface_list=eth0
-
-# nft 模式：本期已归档量（历次重启前累积）+ 当前计数器读数
+mode=proc
+period_start=
+reset_day=1
+quota=1073741824
 nft_rx_done=0
 nft_tx_done=0
 nft_rx_last=0
 nft_tx_last=0
-
-# proc 模式：基准值与最新读数
 proc_rx_base=0
 proc_tx_base=0
 proc_rx_last=0
 proc_tx_last=0
-
-# 重启判定
-uptime_last=12345.67
-ts_last=1758000000
-
-# 告警状态机
-alert_cpu_state=ok
-alert_cpu_last=0
-alert_mem_state=ok
-...
+uptime_last=363723.45
+ts_last=0
+alert_state=
 ```
 
-#### 7.3.3 原子写入
+字段说明：
+
+| 键 | 含义 |
+|---|---|
+| `period_start` | 本计量周期起始日 `YYYY-MM-DD`，由 `reset_day` 推导；未初始化时为空串 |
+| `reset_day` | 计量周期起始日 1~28（**注意键名是 `reset_day`，不是 `period_reset_day`**） |
+| `quota` | 月配额**字节数**，`0` = 不限（**注意键名是 `quota`，不是 `quota_bytes`**） |
+| `nft_rx_done` / `nft_tx_done` | nft 模式：本期已归档量（历次重启前累积） |
+| `nft_rx_last` / `nft_tx_last` | nft 模式：当前计数器读数 |
+| `proc_rx_base` / `proc_tx_base` | proc 模式：周期基准值 |
+| `proc_rx_last` / `proc_tx_last` | proc 模式：最新读数 |
+| `uptime_last` | 上次采样时的 `/proc/uptime`，用于判定系统是否重启 |
+| `ts_last` | 上次采样时间戳 |
+| `alert_state` | 告警状态机（见下） |
+
+**没有 `iface_list`**：网卡只从配置文件读取，不落状态文件
+
+#### 7.3.3 告警状态机的存储形式
+
+`alert_state` 的值是**单行、空格分隔的 `k=v` 串**，而不是每键一行：
+
+```
+alert_state=A_cpu_cnt=3 A_cpu_st=firing A_cpu_last=1758000000 A_syn_cnt=0 A_syn_st=ok ...
+```
+
+每条规则产生 3 个键，命名规则是 `A_<规则名>_<字段>`：
+
+| 字段 | 含义 |
+|---|---|
+| `A_<rule>_cnt` | 连续命中次数（达到阈值才会真正触发） |
+| `A_<rule>_st` | 状态机当前态：`ok` 或 `firing` |
+| `A_<rule>_last` | 上次实际推送的时间戳（用于 600 秒抑制窗口） |
+
+`<规则名>` 即 §12 各条规则的 ID（`cpu` / `mem` / `syn` / `listen_drop` …）。
+读写由 `alert_get` / `alert_set` 负责，整串保存在单个变量里，
+落盘时随 `state_save` 一起写出 —— 这样状态机的更新不会引入额外的文件 I/O。
+
+> 早期文档写作 `alert_cpu_state=ok` 每键一行，与实现不符，已按实况更正。
+
+#### 7.3.4 原子写入
 
 **必须**采用「临时文件 + rename」模式，避免断电/中断写入损坏文件：
 
@@ -734,11 +767,13 @@ CPU% = (Δutime + Δstime) / CLK_TCK / Δt * 100
 
 ### 10.2 曲线渲染
 
-用 Unicode 块字符 `▁▂▃▄▅▆▇█`（8 级）绘制，宽度 = 终端宽度 − 12。
+用 Unicode 块字符 `▁▂▃▄▅▆▇█`（8 级）绘制。
+曲线数据点数为 `终端宽度 − 6`，加上前缀 `"  ↓ "` 后整行占 `终端宽度 − 2` 列。
 
 - 环形缓冲保留最近 N 个采样点（N = 可用宽度）
 - 归一化基准取缓冲内最大值，且设下限（如 64KB/s），避免低流量时噪声被放大成满格
-- ASCII 模式下退化为 `.` `:` `-` `=` `+` `*` `#` `@`
+- ASCII 模式下退化为 8 级：空格 `.` `:` `-` `=` `+` `*` `@`
+  （最低档是**空格**，故实际可见字符只有 7 个；原文档多写了一个 `#`，代码中并不存在）
 
 ### 10.3 颜色阈值
 
@@ -773,7 +808,14 @@ TCP 状态、D 状态进程按 §8.3 / §9.3 单独配色，不套用此表。
 - 启动时探测宽度，运行中监听 `SIGWINCH` 重绘
 - 所有分隔线、量条、曲线按实际宽度计算，**不得硬编码 60 列**（旧版 L375 问题）
 - 宽度 < 60 时进入紧凑模式：隐藏每核视图、端口映射、磁盘 IO 三个次要分区
-- 宽度 < 40 时提示"终端过窄，请调整窗口"
+- 宽度 < 90 时进入**窄终端模式**（`NARROW`，与紧凑模式相互独立）：
+  精简"长度与宽度基本无关的长单行"内容，避免顶出右边界折行、破坏分区对齐 ——
+  - 主机信息行：省去"失败单元 + 发行版/内核/架构"（该行自然宽度约 81 列）
+  - CPU 行：省去 `user / sys / iowait / steal` 明细，只留总量与量条
+  - 底栏：省去完整键位提示，只留刷新间隔、渲染耗时、告警数，另附 `[?]`
+  理由：这些行的长度由内容决定而非 `W`，在 `W < 90` 时必然溢出；
+  直接按字节截断字符串会切断 ANSI 颜色转义序列，故改为**按段精简**。
+- 宽度 < 20 时宽度回退为 80（`term_width` 的兜底），不额外提示
 
 ### 10.6 键盘输入
 
@@ -949,19 +991,33 @@ flock -n 9 || { echo "已在运行"; exit 1; }
 **本地日志**（默认且唯一通道）：
 
 ```
-2026-09-17 09:12:33 [CRIT] [syn] SYN_RECV=142 (阈值 100) 疑似 SYN Flood，当前连接 TOP 来源: 203.0.113.7 (86)
-2026-09-17 09:15:02 [WARN] [cpu] CPU=92.3% 已持续 15 秒，TOP 进程: 8821 node (38.1%)
+2026-09-17 09:12:33 [CRIT] [syn] SYN_RECV 堆积, 疑似 SYN Flood (当前值 142, 阈值 100)
+2026-09-17 09:15:02 [WARN] [cpu] CPU 使用率过高 (当前值 92.3, 阈值 90)
+2026-09-17 09:20:11 [INFO] [cpu] 已恢复 (当前值 34.1, 阈值 90)
 ```
 
-格式要素：时间、级别、规则 ID、实际值、阈值、可读的诊断上下文。
+格式：`<时间> [<级别>] [<规则名>] <描述> (当前值 <值>, 阈值 <阈值>)`。
+级别取 `CRIT` / `WARN` / `INFO`（`INFO` 仅用于恢复通知），规则名即 §12 各条规则的 ID。
 
-**扩展钩子**：若配置了 `NOTIFY_CMD`（环境变量或配置项），每条告警额外执行：
+**描述是固定的规则说明文本，不附带 TOP 来源 IP / TOP 进程** —— 这是有意的取舍：
+定位上下文需要遍历连接表或进程表，开销远高于告警判定本身，不应放进采集热路径。
+（早期文档曾声称"每条告警附带诊断上下文"，实现从未提供，已按实况更正。）
+
+**扩展钩子**：若配置了 `notify_cmd`（**仅配置文件入口，无环境变量入口**），
+每条告警额外执行一次；告警正文通过 **stdin** 传入：
 
 ```bash
-printf '%s' "$ALERT_TEXT" | eval "$NOTIFY_CMD"
+printf '%s' "$line" | eval "$NOTIFY_CMD" >/dev/null 2>&1
 ```
 
-这样用户想接企业微信/钉钉，只需填一条 `curl` 命令，代码零改动。
+两个必须写进文档的约束：
+
+1. **不存在 `$ALERT_TEXT` 变量**。钩子命令只能从标准输入读正文，
+   例如 `curl ... --data-binary @-`。写 `$ALERT_TEXT` 只会把字面量发出去。
+2. **`notify_cmd` 必须写在一行**。配置文件按 `key=value` 逐行解析，
+   用 `\` 续行的后续行不含 `=`，会被当成未知键静默丢弃，
+   导致命令残缺、`eval` 失败（而 stderr 被重定向，用户看不到任何报错）。
+
 `--test-alert` 用于验证钩子连通性。
 
 ---
@@ -1331,25 +1387,41 @@ CPU 占用用面板自身分区反查（自监控）。
 
 ## 附录 B：配置文件格式
 
-`/etc/htop-s/config`，`key=value` 每行一条，`#` 开头为注释：
+`/etc/htop-s/config`，`key=value` 每行一条，`#` 开头为注释。
+**解析是逐行的**：不支持 `\` 续行，值必须与键写在同一行。
 
 ```
 # htop-s 配置
-iface=eth0
-interval=1
-quota=1024G
-reset_day=1
-keep_days=30
-acct=nft
-alert_cpu=90
-alert_mem=90
-alert_disk=90
-alert_syn=100
-notify_cmd=
-lang=zh
+iface=eth0                     # 监控网卡, 多卡用逗号分隔
+interval=1                     # 面板刷新间隔 (1~30 秒); 省略则用内置默认 1
+quota=1024G                    # 月流量配额, 0 = 不限
+reset_day=1                    # 计量周期起始日 (1~28)
+keep_days=30                   # 日志保留天数
+acct=nft                       # 流量计数模式: nft | proc
+proxy=http://127.0.0.1:10808   # 下载代理 (--update / --check-update)
+notify_cmd=                    # 告警通知命令, 必须单行; 正文经 stdin 传入
+lang=en                        # 界面语言: 仅识别的值是 en; 其余(含 zh)均为中文
 ```
 
-优先级：**命令行参数 > 环境变量 > 配置文件 > 内置默认**。
+**以上 9 个键是 `load_config()` 识别的全部集合**。写其它键既不生效也不报错 ——
+例如早期文档中的 `alert_cpu=` / `alert_mem=` / `alert_disk=` / `alert_syn=` 等阈值键
+**从未实现**，阈值是 `alert_scan()` 内的固定字面量（见 §12）。
+
+优先级（与 `load_config()` 实现一致）：
+
+```
+命令行参数 > 配置文件 > 状态文件 > 内置默认
+```
+
+三点澄清：
+
+- **没有通用的环境变量层**。只有下载代理额外支持环境变量兜底，其顺序是
+  `--proxy 参数 > 配置文件(proxy=) > https_proxy/HTTPS_PROXY/all_proxy 等环境变量`（见 §17）。
+  原文档把"环境变量"写成通用的一层，与实现不符。
+- **状态文件**（`/var/lib/htop-s/state`）优先级低于配置文件，
+  即配置文件显式写出的键会覆盖状态文件中的值。
+- `notify_cmd` **只在配置文件中读取**（早期版本还冗余存了一份到状态文件，
+  导致"删掉配置行仍继续发通知"，已移除该副本）。
 
 ---
 
@@ -1369,7 +1441,7 @@ lang=zh
 
 采用语义化版本 `MAJOR.MINOR.PATCH`，**脚本内不带 `v`，Git tag 带 `v`**：
 
-- 脚本 `VERSION="0.0.5"` ↔ tag `v0.0.5`
+- 脚本 `VERSION="0.0.6"` ↔ tag `v0.0.6`
 - 版本比较在 `version_newer()` 中按三段数值比较，不要引入带后缀的版本（如 `0.0.3-beta`）
   —— 现有实现只解析三段数字，遇到后缀会被 `+0` 吞掉
 
@@ -1442,14 +1514,14 @@ https://github.com/<owner>/<repo>/releases/latest/download/<asset>
 
 ```bash
 # 1. 改版本号
-$EDITOR htop-s              # VERSION="0.0.5"
+$EDITOR htop-s              # VERSION="0.0.6"
 
 # 2. 自测
 htop-s --selftest              # 内置 51 项, 任何环境都能跑
 bash tests/run-tests.sh        # 本地开发环境专用; tests/ 不随仓库分发
 
 # 3. 提交
-git add -A && git commit -m "htop-s 0.0.5"
+git add -A && git commit -m "htop-s 0.0.6"
 git push origin main
 
 # 4. 构建产物
@@ -1459,8 +1531,8 @@ chmod +x dist/htop-s dist/install.sh
 (cd dist && sha256sum htop-s install.sh > htop-s.sha256)
 
 # 5. 打 tag
-git tag -a v0.0.5 -m "htop-s 0.0.5"
-git push origin v0.0.5
+git tag -a v0.0.6 -m "htop-s 0.0.6"
+git push origin v0.0.6
 
 # 6. 发布
 gh release create v0.0.5 dist/htop-s dist/install.sh dist/htop-s.sha256 \
@@ -1543,5 +1615,5 @@ git push origin main
 #### 副作用与应对
 
 `tests/` 移出仓库后，从远程克隆的人无法复现集成测试。应对方式：
-`htop-s --selftest` 内置 **50 项自测且不依赖任何外部文件**，作为仓库内可用的最低验证手段。
+`htop-s --selftest` 内置 **51 项自测且不依赖任何外部文件**，作为仓库内可用的最低验证手段。
 README 与开发流程中涉及 `tests/` 的段落均已加注说明。

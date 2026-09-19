@@ -1,7 +1,7 @@
 # htop-s 使用手册
 
 > Linux 服务器实时监控终端面板 · 部署 / 指令 / 排错
-> 版本：0.0.5　|　适用：Debian / Ubuntu / CentOS / Rocky / Alma / Alpine
+> 版本：0.0.6　|　适用：Debian / Ubuntu / CentOS / Rocky / Alma / Alpine
 
 ---
 
@@ -66,7 +66,7 @@ curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/ins
 curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- --service
 
 # 指定版本 / 走代理
-curl -fsSL -x http://127.0.0.1:10808 https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.5
+curl -fsSL -x http://127.0.0.1:10808 https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.6
 ```
 
 安装器会依次做五件事：环境检查（Linux / bash 版本 / 下载工具）→ 准备目录 →
@@ -77,12 +77,17 @@ curl -fsSL -x http://127.0.0.1:10808 https://github.com/zhang123999-qq/htop-s/re
 | 选项 | 说明 |
 |---|---|
 | `-v, --version VER` | 安装指定版本，默认取最新 Release |
-| `--prefix DIR` | 安装目录，默认 `/usr/local/bin` |
+| `--prefix DIR` | 安装目录，默认 `/usr/local/bin`（**不能与 `--service` 同时用**，原因见下） |
 | `--service` | 安装后立即启动开机自启服务 |
 | `--proxy URL` | 下载走代理，如 `http://127.0.0.1:10808` |
 | `--no-verify` | 跳过 sha256 校验 |
 
 > 注：`--service` 需要 root；非 root 运行时会自动跳过并提示手动后台运行的方法。
+>
+> 注：**`--prefix` 与 `--service` 不能同时使用**，同时给出会直接报错。原因是开机自启的
+> 服务单元里 `ExecStart` 固定指向 `/usr/local/bin/htop-s`，若同时把程序装到别处，
+> 会落成两份互不同步的副本，而且服务用的是 `/usr/local/bin` 那份 —— 不是你以为的那份。
+> 需要自定义目录时，请去掉 `--service`，装完后手动执行 `DIR/htop-s --install`。
 
 ### 2.1 裸部署（推荐，不需要 root）
 
@@ -413,7 +418,7 @@ UDP  37  InErr 0 · RcvbufErr 0
 | `p` | 展开 / 收起「端口 → 进程」映射 |
 | `+` / `-` | 刷新间隔 ±1 秒 |
 | `s` | 把当前快照存入日志 |
-| `?` / `h` | 帮助浮层 |
+| `?` | 帮助浮层 |
 
 **暂停键很有用**：看到异常数值想仔细看时，按空格冻结画面，慢慢分析。
 
@@ -486,30 +491,70 @@ htop-s --reset-day 15         # 每月 15 日重置（对齐账单日）
 
 **注意**：周期开始不满半天时不会显示预估，因为样本太少会算出荒谬的值。
 
+### 7.6 配置文件全部可用项
+
+`/etc/htop-s/config`（非 root 部署在 `~/.config/htop-s/config`）按 `key=value` 每行一条，
+`#` 开头为注释。**解析是逐行的 —— 不支持 `\` 换行续写。**
+
+| 键 | 说明 | 默认 |
+|---|---|---|
+| `iface` | 监控网卡，多卡用逗号分隔（如 `eth0,eth1`） | 自动探测默认路由网卡 |
+| `interval` | 面板刷新间隔，1~30 秒 | `1` |
+| `quota` | 月流量配额，支持 `K`/`M`/`G`/`T`，`0` = 不限 | `0` |
+| `reset_day` | 计量周期起始日，1~28 | `1` |
+| `keep_days` | 日志保留天数 | `30` |
+| `acct` | 流量计数模式：`nft` 或 `proc` | `proc` |
+| `proxy` | 下载代理（供 `--update` / `--check-update` 用） | 无 |
+| `notify_cmd` | 告警通知命令，**必须写在一行**，正文经 stdin 传入 | 无 |
+| `lang` | 界面语言，**唯一识别的值是 `en`**；其余（含 `zh`）都是中文 | 中文 |
+
+**以上 9 个键之外写任何东西都不会生效，也不会报错。** 尤其注意：
+
+- 没有 `alert_*` 阈值键（见 §8.4）
+- 没有 `color` / `theme` / `refresh` 之类的键
+- 想确认某个键是否生效，用 `htop-s --config` 查看当前生效值
+
+优先级：**命令行参数 > 配置文件 > 状态文件 > 内置默认**。
+（另外只有下载代理额外支持环境变量兜底，顺序见 §8.3 之后的说明。）
+
+改完配置后执行 `htop-s --restart` 让后台采集重新加载。
+
 ---
 
 ## 8. 告警配置
 
 ### 8.1 默认告警规则
 
-| 指标 | 阈值 | 持续 |
-|---|---|---|
-| CPU 使用率 | ≥ 90% | 3 次采样 |
-| 内存使用率 | ≥ 90% | 3 次采样 |
-| Swap 使用率 | ≥ 50% 且有换页 | 3 次采样 |
-| 磁盘使用率 | ≥ 90% | 立即 |
-| inode 使用率 | ≥ 90% | 立即 |
-| 负载 / 核数 | ≥ 2.0 | 3 次采样 |
-| conntrack 占用 | ≥ 80% | 立即 |
-| SYN_RECV | ≥ 100 | 立即 |
-| TIME_WAIT | ≥ 30000 | 立即 |
-| CLOSE_WAIT | ≥ 500 | 3 次采样 |
-| TCP 重传率 | ≥ 5% | 3 次采样 |
-| 网卡错误/丢包增量 | > 0 | 3 次采样 |
-| 月流量 | ≥ 配额 80% / 100% | 立即 |
-| D 状态进程 | 存在 | 5 次采样 |
-| 断网 | ping 网关失败 | 3 次采样 |
-| OOM 事件 | 增量 > 0 | 立即 |
+| 指标 | 阈值 | 持续 | 规则名 |
+|---|---|---|---|
+| CPU 使用率 | ≥ 90% | 3 次采样 | `cpu` |
+| 内存使用率 | ≥ 90% | 3 次采样 | `mem` |
+| Swap 使用率 | ≥ 50% 且有换页 | 3 次采样 | `swap` |
+| 磁盘使用率 | ≥ 90% | 立即 | `disk` |
+| inode 使用率 | ≥ 90% | 立即 | `inode` |
+| 负载 / 核数 | ≥ 2.0 | 3 次采样 | `load` |
+| conntrack 占用 | ≥ 80% | 立即 | `conntrack` |
+| SYN_RECV | ≥ 100 | 立即 | `syn` |
+| TIME_WAIT | ≥ 30000 | 立即 | `timewait` |
+| CLOSE_WAIT | ≥ 500 | 3 次采样 | `closewait` |
+| TCP 重传率 | ≥ 5% | 3 次采样 | `retrans` |
+| SYN 重传**本周期新增** | ≥ 10 | 3 次采样 | `syn_retrans` |
+| accept 队列溢出（ListenOverflows）**本周期新增** | ≥ 1 | 3 次采样 | `listen_drop` |
+| 网卡错误/丢包**增量** | > 0 | 3 次采样 | `nic_err` |
+| UDP 收包错误**增量** | > 0 | 3 次采样 | `udp_err` |
+| 月流量 | ≥ 配额 80% / 100% | 立即 | `quota80` / `quota100` |
+| D 状态进程 | 存在 | 5 次采样 | `dstate` |
+| 断网 | ping 网关失败 | 3 次采样 | `netdown` |
+| OOM 事件 | 开机以来发生过（**锁存，不自动恢复**） | 立即 | `oom` |
+
+> **「本周期新增 / 增量」是什么意思？**
+> 内核的 `/proc/net/netstat`、`/proc/net/snmp` 里这些计数器是**开机以来的累计值**。
+> 直接拿累计值比阈值必然会误报（一台跑了几天的机器累计值远超阈值），
+> 所以这几条规则比较的是**两次采样之间的差值**。首轮采样只建立基准、不告警。
+>
+> **`oom` 是唯一的例外**：它比较的是 `/proc/vmstat` 的 `oom_kill` 累计值，
+> 一旦本机发生过 OOM 就会一直保持告警状态，**不会自行恢复**（属有意设计——
+> OOM 是需要人工介入的事件）。看 `htop-s --alert` 时请注意这一点。
 
 ### 8.2 在哪看告警
 
@@ -520,15 +565,20 @@ htop-s --alert 200      # 最近 200 条
 
 原始文件：`/var/log/htop-s/alert-YYYY-MM-DD.log`
 
-格式示例：
+格式为 `<时间> [<级别>] [<规则名>] <描述> (当前值 <值>, 阈值 <阈值>)`：
 
 ```
-2026-09-17 09:12:33 [CRIT] [syn] SYN_RECV=142 (阈值 100) 疑似 SYN Flood，TOP 来源: 203.0.113.7 (86)
-2026-09-17 09:15:02 [WARN] [cpu] CPU=92.3% 已持续 15 秒，TOP 进程: 8821 node (38.1%)
-2026-09-17 09:20:11 [INFO] [cpu] 已恢复 (当前 34.1%)
+2026-09-17 09:12:33 [CRIT] [syn] SYN_RECV 堆积, 疑似 SYN Flood (当前值 142, 阈值 100)
+2026-09-17 09:15:02 [WARN] [cpu] CPU 使用率过高 (当前值 92.3, 阈值 90)
+2026-09-17 09:20:11 [INFO] [cpu] 已恢复 (当前值 34.1, 阈值 90)
 ```
 
-每条告警都附带**诊断上下文**（TOP 来源 IP、TOP 占用进程），不用再去别处查。
+`[级别]` 为 `CRIT` / `WARN` / `INFO`（`INFO` 只用于「已恢复」）；
+`[规则名]` 就是 §8.1 表格最后一列，可用 `grep '\[cpu\]'` 之类筛选单条规则。
+
+> **告警正文不含诊断上下文**（没有 TOP 来源 IP、没有 TOP 占用进程）——
+> 需要定位时用 `htop-s` 面板或 `htop-s --status` 查看当时的 TOP 进程与对端。
+> 若希望告警里带上这些信息，需要在 `notify_cmd` 里自行补充（见 §8.3）。
 
 ### 8.3 想让告警推到手机？
 
@@ -538,12 +588,26 @@ Telegram 等任意通道。
 编辑 `/etc/htop-s/config`：
 
 ```
-notify_cmd=curl -s -X POST 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的KEY' \
-  -H 'Content-Type: application/json' \
-  -d '{"msgtype":"text","text":{"content":"服务器告警: $ALERT_TEXT"}}'
+notify_cmd=curl -s -X POST 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的KEY' -H 'Content-Type: application/json' --data-binary @-
 ```
 
-告警内容会通过管道传入这条命令（也可用 `$ALERT_TEXT` 变量引用）。
+两个必须注意的点：
+
+1. **`notify_cmd` 必须写在一行**。配置文件是逐行按 `key=value` 解析的，
+   用 `\` 换行续写只会让后续几行被当成无法识别的键丢弃，通知静默失效。
+   命令很长时建议先写成一个脚本，再让 `notify_cmd` 指向它：
+   ```
+   notify_cmd=/usr/local/bin/my-alert-hook.sh
+   ```
+2. **告警正文通过标准输入（stdin）传入**，不是环境变量。
+   所以要像上面那样用 `--data-binary @-`（curl）或 `-i -` 之类的参数读取 stdin。
+   **不存在 `$ALERT_TEXT` 变量**，写进请求体只会原样发出去。
+
+完整可用的企业微信示例（单行）：
+
+```
+notify_cmd=sh -c 'printf "{\"msgtype\":\"text\",\"text\":{\"content\":\"服务器告警: %s\"}}" "$(cat)" | curl -s -X POST "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的KEY" -H "Content-Type: application/json" --data-binary @-'
+```
 
 测试连通性：
 
@@ -551,21 +615,26 @@ notify_cmd=curl -s -X POST 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key
 htop-s --test-alert
 ```
 
-**提示**：命令里如果含单引号，注意在配置文件中的转义。不确定就先在 shell 里手测通再填。
+**提示**：命令里如果含单引号，注意在配置文件中的转义。不确定就先在 shell 里手测通再填
+（手测方法：`echo '测试告警' | <你的命令>`）。
 
-### 8.4 调整阈值
+### 8.4 阈值可以改吗？
 
-在 `/etc/htop-s/config` 中按需覆盖：
+**当前版本不支持自定义阈值。** §8.1 表格里的阈值是脚本内置的固定值，
+写死在 `htop-s` 源码的 `alert_scan()` 里，`/etc/htop-s/config` 中**没有** `alert_*` 这类配置项；
+即使写进去也会被忽略（配置文件只识别 §7/§8.3 提到的那几个键，用 `htop-s --config` 可查看当前生效值）。
 
-```
-alert_cpu=90
-alert_mem=90
-alert_disk=90
-alert_syn=100
-alert_load=2.0
-```
+想调整阈值，只有两条路：
 
-改完 `htop-s --restart` 生效。
+1. **改源码**：编辑 `/usr/local/bin/htop-s`，在 `alert_scan()` 中找到对应的
+   `alert_eval <规则名> <当前值> <阈值> <级别> <持续次数> "<描述>"` 调用，改第 3 个参数
+   （阈值）或第 5 个参数（需要连续命中几次才告警）。改完执行 `htop-s --restart`。
+   注意：下次 `--update` 升级会覆盖你的改动。
+2. **在阈值上下做二次过滤**：把 `notify_cmd` 指向自己的脚本（见 §8.3），
+   在脚本里按需丢弃或升级通知，不动 `htop-s` 本身。**推荐这种方式**，升级不受影响。
+
+> 若希望官方支持 `alert_cpu=` 这类配置项，需要先改《开发方案》的规格再改实现，
+> 当前版本尚未实现 —— 请不要按旧版本文档尝试，那样只会静默无效。
 
 ### 8.5 告警抑制
 
@@ -833,7 +902,7 @@ nohup htop-s --daemon >/dev/null 2>&1 &
 ```bash
 htop-s --check-update        # 只检查, 不安装
 sudo htop-s --update         # 更新到最新版
-sudo htop-s --update=0.0.5   # 更新到指定版本
+sudo htop-s --update=0.0.6   # 更新到指定版本
 sudo htop-s --update --force # 版本相同也强制重装
 ```
 

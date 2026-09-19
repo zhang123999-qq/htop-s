@@ -78,7 +78,7 @@ htop-s 一键安装脚本
   curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- --service
 
   # 指定版本
-  curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.5
+  curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.6
 
   # 国内网络走代理
   curl -fsSL -x http://127.0.0.1:10808 https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash
@@ -89,7 +89,7 @@ EOF
 while [ $# -gt 0 ]; do
     case "$1" in
         -v|--version)
-            [ $# -ge 2 ] || die "-v 需要一个版本号, 例: -v 0.0.5"
+            [ $# -ge 2 ] || die "-v 需要一个版本号, 例: -v 0.0.6"
             WANT_VER="${2#v}"; shift 2 ;;
         --version=*) WANT_VER="${1#*=}"; WANT_VER="${WANT_VER#v}"; shift ;;
         --prefix)
@@ -109,6 +109,15 @@ done
 
 BASE="https://github.com/${REPO_OWNER}/${REPO_NAME}"
 
+# --service 会转调 `htop-s --install`, 而后者的安装路径写死在 BIN_PATH=/usr/local/bin/htop-s,
+# systemd 单元的 ExecStart 也指向它。若同时指定自定义 --prefix, 结果会落成两份互不同步的
+# 副本, 且服务用的是 /usr/local/bin 那份 —— 用户以为装到了 $PREFIX, 实际不是。故直接拒绝。
+if [ "$DO_SERVICE" = "1" ] && [ "$PREFIX" != "/usr/local/bin" ]; then
+    die "--service 与自定义 --prefix 不能同时使用。
+      服务固定安装在 /usr/local/bin/htop-s, 与你指定的 $PREFIX 会形成两份副本。
+      请去掉 --prefix (推荐), 或去掉 --service 后手动执行: $PREFIX/htop-s --install"
+fi
+
 printf '\n\033[1mhtop-s 安装程序\033[0m\n\n'
 
 #-------------------------------------------------------------------------------
@@ -124,8 +133,12 @@ ok "系统: Linux"
 if [ -z "${BASH_VERSION:-}" ]; then
     die "请用 bash 运行本脚本"
 fi
-BV="${BASH_VERSION%%.*}"
-if [ "$BV" -lt 3 ] 2>/dev/null; then
+# 比较"主版本*10+次版本" —— 只取主版本号会放行 bash 3.0 / 3.1,
+# 而 htop-s 的兼容基线是 3.2 (自测第一项就是 3.2 语法扫描)。
+BV="${BASH_VERSION%%.*}"; BM="${BASH_VERSION#*.}"; BM="${BM%%.*}"
+case "$BV" in ''|*[!0-9]*) BV=0 ;; esac
+case "$BM" in ''|*[!0-9]*) BM=0 ;; esac
+if [ $(( BV * 10 + BM )) -lt 32 ] 2>/dev/null; then
     die "需要 bash >= 3.2 (当前 $BASH_VERSION)"
 fi
 ok "bash: $BASH_VERSION"
@@ -216,7 +229,11 @@ if [ -n "$WANT_VER" ] && [ "$GOT_VER" != "$WANT_VER" ]; then
 fi
 ok "版本: v$GOT_VER"
 
-if [ "$NO_VERIFY" != "1" ] && command -v sha256sum >/dev/null 2>&1; then
+if [ "$NO_VERIFY" = "1" ]; then
+    info "已跳过 sha256 校验 (--no-verify)"
+elif ! command -v sha256sum >/dev/null 2>&1; then
+    info "未找到 sha256sum, 跳过完整性校验 (建议安装 coreutils)"
+else
     SUMPROG="$(pick_tmp)/${PROG}.sum.$$"
     SUMURL="${URL}.sha256"
     if fetch "$SUMURL" "$SUMPROG" && [ -s "$SUMPROG" ]; then

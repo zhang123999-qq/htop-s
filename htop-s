@@ -2,7 +2,7 @@
 #===============================================================================
 # htop-s — Linux 服务器实时监控终端面板
 #
-# 版本: 0.0.5
+# 版本: 0.0.6
 # 依赖: bash >= 3.2, awk (POSIX), coreutils
 # 数据: 全部来自 /proc 与 /sys, 不使用 ss/netstat/ps/free/iostat
 #
@@ -17,7 +17,7 @@
 
 set -u
 
-VERSION="0.0.5"
+VERSION="0.0.6"
 PROG="htop-s"
 
 #===============================================================================
@@ -63,7 +63,6 @@ HAS_SORT=0; HAS_READLINK=0; HAS_STTY=0
 PAGESIZE=4096
 CLK_TCK=100
 TERM_COLS=80
-TERM_ROWS=24
 
 C_RESET=""; C_BOLD=""; C_DIM=""
 C_RED=""; C_GREEN=""; C_YELLOW=""; C_CYAN=""; C_MAGENTA=""; C_BLUE=""; C_WHITE=""
@@ -74,6 +73,7 @@ PREV_DSK_RD=0; PREV_DSK_WR=0; PREV_DSK_RC=0; PREV_DSK_WC=0; PREV_DSK_IOT=0
 PREV_PG_IN=0; PREV_PG_OUT=0
 PREV_SEG_IN=0; PREV_SEG_OUT=0; PREV_SEG_RET=0; PREV_UDP_ERR=0; PREV_UDP_BUF=0
 PREV_SYN_RET=0; SYN_RET_INIT=0
+PREV_LIS_OVF=0; LIS_OVF_INIT=0
 
 T_FAST=0; T_MID=0; T_SLOW=0
 LAST_DATE=""
@@ -100,6 +100,7 @@ CV_TCP_PORTS=""
 MV_DISK_RD=0; MV_DISK_WR=0; MV_DISK_IOPS=0; MV_DISK_UTIL=0
 MV_RETRANS=0; MV_LIS_OVF=0; MV_LIS_DROP=0; MV_SYN_RET=0; MV_SYNCOOKIE=0
 MV_SYN_RET_INC=0
+MV_LIS_OVF_INC=0
 MV_TW_OVF=0; MV_UDP_INERR=0; MV_UDP_RCVBUF=0
 MV_CONNTRACK=0; MV_CONNTRACK_MAX=0
 MV_PROCS=""; MV_PORTS=""; MV_PORTS_ON=0
@@ -149,6 +150,7 @@ init_i18n() {
         T_IFACE="NIC"; T_IP="IP"; T_CUM="Total"; T_LIVE="Live"; T_PEAK="Peak"
         T_DOWN="down"; T_UP="up"; T_SUM="sum"; T_ERR="err"; T_DROP="drop"
         T_TCP="TCP"; T_UDP="UDP"; T_LISTEN="LISTEN"; T_TOPCPU="Top CPU processes"
+        T_TOPPROC="Top processes"
         T_MONTH="This month"; T_EST="forecast"; T_INCOMPLETE="DATA INCOMPLETE"
         T_PID="PID"; T_THR="THR"; T_ST="ST"; T_CMD="COMMAND"; T_MEMCOL="MEM"
         T_USER="user"; T_SYS="sys"; T_IO="iowait"; T_STEAL="steal"
@@ -177,6 +179,7 @@ init_i18n() {
         T_IFACE="网卡"; T_IP="IP"; T_CUM="累计"; T_LIVE="实时"; T_PEAK="峰值"
         T_DOWN="下行"; T_UP="上行"; T_SUM="合计"; T_ERR="错误"; T_DROP="丢包"
         T_TCP="TCP"; T_UDP="UDP"; T_LISTEN="监听"; T_TOPCPU="CPU 占用 TOP 进程"
+        T_TOPPROC="TOP 进程"
         T_MONTH="本月"; T_EST="预计月底"; T_INCOMPLETE="数据不完整"
         T_PID="PID"; T_THR="线程"; T_ST="状态"; T_CMD="命令行"; T_MEMCOL="内存"
         T_USER="用户态"; T_SYS="内核态"; T_IO="IO等待"; T_STEAL="被抢占"
@@ -245,15 +248,6 @@ term_width() {
     TERM_COLS=$w
 }
 
-term_height() {
-    local h=""
-    [ "$HAS_TPUT" = "1" ] && h=$(tput lines 2>/dev/null)
-    is_num "${h:-}" || h=$(stty size 2>/dev/null | awk '{print $1}')
-    is_num "${h:-}" || h=24
-    [ "$h" -lt 5 ] && h=24
-    TERM_ROWS=$h
-}
-
 # 挑选临时目录: 尊重 TMPDIR, 但必须以"实际写入"验证可用; 否则退回标准路径
 pick_tmp() {
     local d t
@@ -272,6 +266,16 @@ pick_tmp() {
 
 is_num() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 
+# 把变量名 $1 指向的值就地规整为整数: 非数字(含空)一律置 0。
+# 用间接展开 ${!1} 而不是 eval —— 两者语义等价, 但 eval 需要二次解析,
+# 既难读又会被静态检查工具误判, 这里零 fork 且意图明确。
+nz0v() {
+    case "${!1:-}" in
+        ''|*[!0-9]*) printf -v "$1" '%s' 0 ;;
+    esac
+    return 0
+}
+
 #===============================================================================
 # 4. 单位与格式 (纯 shell, 不 fork)
 #===============================================================================
@@ -287,10 +291,6 @@ human_bytes() {
     fi
 }
 
-human_rate() { human_bytes "${1:-0}"; printf '/s'; }
-
-human_size_from_kb() { human_bytes "$(( ${1:-0} * 1024 ))"; }
-
 fmt_uptime() {
     local s="${1:-0}" d h m
     is_num "${s%%.*}" || s=0
@@ -298,15 +298,6 @@ fmt_uptime() {
     d=$(( s / 86400 )); h=$(( (s % 86400) / 3600 )); m=$(( (s % 3600) / 60 ))
     if [ "$OUT_LANG" = "en" ]; then printf '%dd %dh %dm' "$d" "$h" "$m"
     else printf '%d天%d小时%d分' "$d" "$h" "$m"; fi
-}
-
-pct_color() {
-    local p="${1:-0}"
-    is_num "${p%%.*}" || p=0
-    p=${p%%.*}
-    if [ "$p" -ge 85 ]; then printf '%s' "$C_RED"
-    elif [ "$p" -ge 60 ]; then printf '%s' "$C_YELLOW"
-    else printf '%s' "$C_GREEN"; fi
 }
 
 bar() {
@@ -336,7 +327,6 @@ hr_line() {
     printf '%s' "$out"
 }
 
-seg() { printf '%s%s%s' "$C_DIM" "$1" "$C_RESET"; }
 bold() { printf '%s%s%s' "$C_BOLD" "$1" "$C_RESET"; }
 
 sparkline() {
@@ -485,22 +475,6 @@ cpu_cores_delta() {
              printf "%d ", v }
     }
     END { printf "\n" }'
-}
-
-read_mem() {
-    [ -r "$PROC_ROOT/meminfo" ] || { printf '0 0 0 0 0 0 0 0'; return; }
-    awk '
-    /^MemTotal:/{t=$2} /^MemFree:/{f=$2} /^MemAvailable:/{a=$2}
-    /^Buffers:/{b=$2} /^Cached:/{c=$2} /^SReclaimable:/{sr=$2} /^Shmem:/{sh=$2}
-    /^Dirty:/{d=$2} /^Writeback:/{wb=$2}
-    /^SwapTotal:/{st=$2} /^SwapFree:/{sf=$2}
-    END {
-        if (a == "") a = f + b + c
-        cache = c + sr - sh
-        if (cache < 0) cache = 0
-        used = t - a; if (used < 0) used = 0
-        printf "%d %d %d %d %d %d %d %d\n", t*1024, used*1024, st*1024, (st-sf)*1024, cache*1024, d*1024, wb*1024, a*1024
-    }' "$PROC_ROOT/meminfo" 2>/dev/null
 }
 
 read_loadavg() {
@@ -1184,7 +1158,6 @@ state_load() {
             uptime_last) ST_UPTIME_LAST=$v ;;
             ts_last) ST_TS_LAST=$v ;;
             alert_state) ALERT_STATE_LINE=$v ;;
-            notify_cmd) NOTIFY_CMD=$v ;;
         esac
     done < "$STATE_FILE"
 
@@ -1192,12 +1165,9 @@ state_load() {
     [ "$ST_RESET_DAY" -lt 1 ] && ST_RESET_DAY=1
     [ "$ST_RESET_DAY" -gt 28 ] && ST_RESET_DAY=28
     case "${ST_QUOTA:-0}" in ''|*[!0-9]*) ST_QUOTA=0 ;; esac
-    for k in ST_NFT_RX_DONE ST_NFT_TX_DONE ST_NFT_RX_LAST ST_NFT_TX_LAST; do
-        eval "case \"\${$k:-}\" in ''|*[!0-9]*) $k=0 ;; esac"
-    done
-    for k in ST_PROC_RX_BASE ST_PROC_TX_BASE ST_PROC_RX_LAST ST_PROC_TX_LAST ST_TS_LAST; do
-        eval "case \"\${$k:-}\" in ''|*[!0-9]*) $k=0 ;; esac"
-    done
+    nz0v ST_NFT_RX_DONE; nz0v ST_NFT_TX_DONE; nz0v ST_NFT_RX_LAST; nz0v ST_NFT_TX_LAST
+    nz0v ST_PROC_RX_BASE; nz0v ST_PROC_TX_BASE; nz0v ST_PROC_RX_LAST; nz0v ST_PROC_TX_LAST
+    nz0v ST_TS_LAST
     is_num "${ST_UPTIME_LAST%%.*}" || ST_UPTIME_LAST=0
 }
 
@@ -1223,7 +1193,6 @@ state_save() {
         printf 'uptime_last=%s\n' "$ST_UPTIME_LAST"
         printf 'ts_last=%s\n' "$ST_TS_LAST"
         printf 'alert_state=%s\n' "$ALERT_STATE_LINE"
-        printf 'notify_cmd=%s\n' "$NOTIFY_CMD"
     } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
     mv -f "$tmp" "$STATE_FILE" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
     return 0
@@ -1550,7 +1519,7 @@ EOF
         -v cpu="$CV_CPU_TOTAL" -v mem="$mempct" -v swp="$swappct" -v pgout="$CV_PG_OUT" \
         -v dsk="$dmax" -v ino="$imax" -v ld="$loadn" \
         -v syn="$CV_TCP_SYN" -v tw="$CV_TCP_TW" -v cw="$CV_TCP_CW" \
-        -v lovf="$MV_LIS_OVF" -v rt="$MV_RETRANS" -v sret="$MV_SYN_RET_INC" \
+        -v lovf="$MV_LIS_OVF_INC" -v rt="$MV_RETRANS" -v sret="$MV_SYN_RET_INC" \
         -v ct="$ctpct" -v nic="$(( CV_RXERR + CV_TXERR + CV_RXDROP + CV_TXDROP ))" \
         -v udpe="$(( MV_UDP_INERR + MV_UDP_RCVBUF ))" -v oom="$CV_OOM" \
         -v dst="$dn" -v qp="$CV_QUOTA_PCT" '
@@ -1590,7 +1559,7 @@ EOF
     alert_eval syn         "$CV_TCP_SYN"    100  CRIT 1 "SYN_RECV 堆积, 疑似 SYN Flood" "${f_syn:-0}"
     alert_eval timewait    "$CV_TCP_TW"     30000 WARN 1 "TIME_WAIT 数量过高"          "${f_tw:-0}"
     alert_eval closewait   "$CV_TCP_CW"     500  WARN 3 "CLOSE_WAIT 堆积, 应用可能未关闭连接" "${f_cw:-0}"
-    alert_eval listen_drop "$MV_LIS_OVF"    1    WARN 3 "accept 队列溢出 ListenOverflows" "${f_lovf:-0}"
+    alert_eval listen_drop "$MV_LIS_OVF_INC" 1   WARN 3 "accept 队列溢出 (本周期新增)" "${f_lovf:-0}"
     alert_eval retrans     "$MV_RETRANS"    5    WARN 3 "TCP 重传率过高"               "${f_rt:-0}"
     alert_eval syn_retrans "$MV_SYN_RET_INC" 10  WARN 3 "SYN 重传激增 (本周期新增)"       "${f_sret:-0}"
     alert_eval conntrack   "$ctpct"         80   CRIT 1 "conntrack 表接近上限"          "${f_ct:-0}"
@@ -1780,17 +1749,25 @@ sample_mid() {
     PREV_UDP_ERR=$ue; PREV_UDP_BUF=$ub
 
     read -r MV_LIS_OVF MV_LIS_DROP MV_SYN_RET MV_TW_OVF MV_SYNCOOKIE <<< "$(read_netstat_ext)"
-    # SYN 重传: /proc/net/netstat 的 TCPSynRetrans 是开机以来的累计计数器,
-    # 直接拿它与阈值比较必然误报 —— 任何运行时间稍长的机器累计值都远超阈值
-    # (实测一台运行 3 天的机器该值为 60 万)。故改为按本帧增量判定:
-    # 首轮只建立基准不告警, 之后每帧取差值; 计数器归零(重启)时按 0 处理。
+    # SYN 重传 / accept 队列溢出: /proc/net/netstat 的 TCPSynRetrans 与 ListenOverflows
+    # 都是开机以来的累计计数器, 直接拿它们与阈值比较必然误报 —— 任何运行时间稍长的
+    # 机器累计值都远超阈值 (实测一台运行 3 天的机器 SYN 重传达 60 万)。
+    # 故两者一律改为按本帧增量判定: 首轮只建立基准不告警, 之后每帧取差值;
+    # 计数器归零(重启)时按 0 处理。
     is_num "${MV_SYN_RET:-}" || MV_SYN_RET=0
+    is_num "${MV_LIS_OVF:-}" || MV_LIS_OVF=0
     if [ "${SYN_RET_INIT:-0}" = "1" ]; then
         MV_SYN_RET_INC=$(( MV_SYN_RET - PREV_SYN_RET ))
         [ "$MV_SYN_RET_INC" -lt 0 ] && MV_SYN_RET_INC=0
     fi
+    if [ "${LIS_OVF_INIT:-0}" = "1" ]; then
+        MV_LIS_OVF_INC=$(( MV_LIS_OVF - PREV_LIS_OVF ))
+        [ "$MV_LIS_OVF_INC" -lt 0 ] && MV_LIS_OVF_INC=0
+    fi
     PREV_SYN_RET=$MV_SYN_RET
     SYN_RET_INIT=1
+    PREV_LIS_OVF=$MV_LIS_OVF
+    LIS_OVF_INIT=1
     read -r MV_CONNTRACK MV_CONNTRACK_MAX <<< "$(read_conntrack)"
     is_num "${MV_CONNTRACK:-}" || MV_CONNTRACK=0
     is_num "${MV_CONNTRACK_MAX:-}" || MV_CONNTRACK_MAX=0
@@ -1862,15 +1839,6 @@ p_line() {
     else printf '%s\n' "$1"; fi
 }
 
-state_color() {
-    case "$1" in
-        R) printf '%s' "$C_GREEN" ;;
-        D|Z) printf '%s' "$C_RED" ;;
-        T) printf '%s' "$C_YELLOW" ;;
-        *) printf '%s' "$C_DIM" ;;
-    esac
-}
-
 proc_enrich() {
     # 为 TOP 进程补全命令行 (只读前 N 个, 开销可控)
     local pline pid cmd out=""
@@ -1904,7 +1872,11 @@ render() {
     [ "$bw" -lt 8 ] && bw=8
     [ "$bw" -gt 24 ] && bw=24
     if [ "$W" -lt 60 ]; then COMPACT=1; else COMPACT=0; fi
-    local now up loadn line i
+    # 窄终端 (W<90): 主机信息行自然宽度约 81 列, 且与 W 基本无关 —— 在 W<90 时
+    # 必然顶出右边界折行, 破坏分区对齐。此标志只精简"长度失控的单行"内容,
+    # 不改变分区可见性 (那是 COMPACT 的职责), 两者相互独立。
+    if [ "$W" -lt 90 ]; then NARROW=1; else NARROW=0; fi
+    local now up loadn line i proc_wid
     local HB_RXT HB_TXT HB_SUM HB_MU HB_MT HB_CA HB_SU HB_ST HB_DI HB_WB
     local HR_RX HR_TX HR_PKR HR_PKT HR_PGI HR_PGO HR_DR HR_DW
     local HB_PRX HB_PTX HB_QT HB_ETA
@@ -1969,18 +1941,25 @@ render() {
     line="  ${C_CYAN}${SV_HOST}${C_RESET}  ${C_DIM}${now}${C_RESET}  ${T_UPTIME} ${C_GREEN}${up}${C_RESET}  ${C_GREEN}${SV_CORES_N}${C_RESET}${T_CORES}"
     [ -n "${SV_TEMP:-}" ] && line="${line}  ${C_MAGENTA}${T_TEMP} ${SV_TEMP}°C${C_RESET}"
     p_line "$line"
-    p_line "  ${C_GREEN}${IFACE_MAIN}${C_RESET} ${C_DIM}${SV_IP}${C_RESET}  ${T_USERS} ${SV_USERS}  ${T_ZOMBIE} ${SV_ZOMBIE}  ${T_FAILED} ${SV_SYSTEMD_FAIL}  ${C_DIM}${SV_OS} ${SV_KERNEL} ${SV_ARCH}${C_RESET}"
+    # 紧凑模式 (W<60) 下省去失败单元与系统标识 —— 这两段最长且可推断,
+    # 留着会把整行顶出终端宽度而折行, 破坏分区对齐。
+    line="  ${C_GREEN}${IFACE_MAIN}${C_RESET} ${C_DIM}${SV_IP}${C_RESET}  ${T_USERS} ${SV_USERS}  ${T_ZOMBIE} ${SV_ZOMBIE}"
+    [ "$NARROW" != "1" ] && line="${line}  ${T_FAILED} ${SV_SYSTEMD_FAIL}  ${C_DIM}${SV_OS} ${SV_KERNEL} ${SV_ARCH}${C_RESET}"
+    p_line "$line"
     p_line "$HR_LINE"
 
     if [ "$MINIMAL" != "1" ]; then
 
     # ---- CPU ----
     line="  ${C_BOLD}${T_CPU}${C_RESET} ${PC_CPU}${BA_CPU}${C_RESET} ${PC_CPU}${CV_CPU_TOTAL}%${C_RESET}"
-    line="${line}  ${C_DIM}${T_USER} ${CV_CPU_USER}  ${T_SYS} ${CV_CPU_SYS}  ${T_IO} ${CV_CPU_IO}${C_RESET}"
-    if [ "${CV_CPU_STEAL%%.*}" -gt 0 ] 2>/dev/null; then
-        line="${line}  ${C_YELLOW}${T_STEAL} ${CV_CPU_STEAL}${C_RESET}"
-    else
-        line="${line}  ${C_DIM}${T_STEAL} ${CV_CPU_STEAL}${C_RESET}"
+    # 窄终端只保留总量与量条: user/sys/io/steal 明细会把整行顶出 W 而折行
+    if [ "$NARROW" != "1" ]; then
+        line="${line}  ${C_DIM}${T_USER} ${CV_CPU_USER}  ${T_SYS} ${CV_CPU_SYS}  ${T_IO} ${CV_CPU_IO}${C_RESET}"
+        if [ "${CV_CPU_STEAL%%.*}" -gt 0 ] 2>/dev/null; then
+            line="${line}  ${C_YELLOW}${T_STEAL} ${CV_CPU_STEAL}${C_RESET}"
+        else
+            line="${line}  ${C_DIM}${T_STEAL} ${CV_CPU_STEAL}${C_RESET}"
+        fi
     fi
     p_line "$line"
 
@@ -2097,7 +2076,9 @@ EOF
     # ctpct 已在 render 开头与其他算术指标一并算出 (原来在此单独 fork 一次 awk);
     # 注意此处不能再用 local ctpct=0 声明, 否则会把已算好的值重置。
     if [ "${MV_RETRANS:-0}" != "0" ] 2>/dev/null; then rtc="$C_YELLOW"; else rtc="$C_DIM"; fi
-    p_line "  ${C_DIM}${T_RETRANS}${C_RESET} ${rtc}${MV_RETRANS}%${C_RESET}  ${C_DIM}${T_OVERFLOW} ${MV_LIS_OVF}  ListenDrop ${MV_LIS_DROP}  SYN${T_RETRANS} ${MV_SYN_RET}  conntrack ${MV_CONNTRACK}/${MV_CONNTRACK_MAX} (${ctpct}%)${C_RESET}"
+    # 队列溢出 / SYN 重传: 显示 "累计(+本周期新增)"。
+    # 告警判定用的是括号里的增量(累计值必然误报), 两者并排显示才能对应得上。
+    p_line "  ${C_DIM}${T_RETRANS}${C_RESET} ${rtc}${MV_RETRANS}%${C_RESET}  ${C_DIM}${T_OVERFLOW} ${MV_LIS_OVF}(+${MV_LIS_OVF_INC})  ListenDrop ${MV_LIS_DROP}  SYN${T_RETRANS} ${MV_SYN_RET}(+${MV_SYN_RET_INC})  conntrack ${MV_CONNTRACK}/${MV_CONNTRACK_MAX} (${ctpct}%)${C_RESET}"
 
     # ---- UDP ----
     p_line "  ${C_BOLD}${T_UDP}${C_RESET}  ${C_WHITE}${CV_UDP_TOTAL}${C_RESET}  ${C_DIM}InErr ${MV_UDP_INERR}   RcvbufErr ${MV_UDP_RCVBUF}${C_RESET}"
@@ -2124,28 +2105,38 @@ EOF
 
     if [ "$MINIMAL" != "1" ]; then
     # ---- 进程 ----
-    if [ "$CV_PROC_MODE" = "n" ] || [ "$CV_PROC_MODE" = "i" ]; then
-        if [ "$CV_PROC_MODE" = "n" ]; then hdr_met="CONN"; else hdr_met="IO"; fi
-        p_line "  ${C_BOLD}${T_TOPCPU}${C_RESET}  ${C_DIM}[${hdr_met}]${C_RESET}"
-        # 表头内容在 i18n 初始化后不再变化, 用 printf -v 预计算并缓存。
-        # 原写法 ${C_DIM} $(printf ...) ${C_RESET} 中 printf 虽是内置命令,
-        # 但 $( ) 仍会 fork 一个子 shell —— 每帧白白付两次。
-        if [ -z "${HDR_NI:-}" ]; then
-            printf -v HDR_NI '%7s %8s %8s %7s %5s  %-4s %s' \
-                "$T_PID" "$hdr_met" "$T_CPU" "$T_MEMCOL" "$T_THR" "$T_ST" "$T_CMD"
-        fi
-        p_line "${C_DIM}  ${HDR_NI}${C_RESET}"
-    else
-        p_line "  ${C_BOLD}${T_TOPCPU}${C_RESET}"
-        if [ -z "${HDR_STD:-}" ]; then
-            printf -v HDR_STD '%7s %8s %7s %5s  %-4s %s' \
-                "$T_PID" "$T_CPU" "$T_MEMCOL" "$T_THR" "$T_ST" "$T_CMD"
-        fi
-        p_line "${C_DIM}  ${HDR_STD}${C_RESET}"
-    fi
+    # 分区标题随排序键变化 —— 固定写 "CPU 占用 TOP 进程" 在 m/n/i 模式下自相矛盾
+    case "$CV_PROC_MODE" in
+        c) p_line "  ${C_BOLD}${T_TOPCPU}${C_RESET}" ;;
+        m) p_line "  ${C_BOLD}${T_TOPPROC}${C_RESET}  ${C_DIM}[MEM]${C_RESET}" ;;
+        n) p_line "  ${C_BOLD}${T_TOPPROC}${C_RESET}  ${C_DIM}[CONN]${C_RESET}" ;;
+        *) p_line "  ${C_BOLD}${T_TOPPROC}${C_RESET}  ${C_DIM}[IO]${C_RESET}" ;;
+    esac
+    # 表头内容在 i18n 初始化后不再变化, 用 printf -v 预计算并缓存。
+    # 原写法 ${C_DIM} $(printf ...) ${C_RESET} 中 printf 虽是内置命令,
+    # 但 $( ) 仍会 fork 一个子 shell —— 每帧白白付两次。
+    # n / i 的表头必须分开缓存: 原先把两者合用一个变量, 于是先按 n 再按 i
+    # 会沿用 "CONN" 表头, 而右侧实际显示的是 IO 数值。
+    case "$CV_PROC_MODE" in
+        n) [ -n "${HDR_N:-}" ] || printf -v HDR_N '%7s %8s %8s %7s %5s  %-4s %s' \
+               "$T_PID" "CONN" "$T_CPU" "$T_MEMCOL" "$T_THR" "$T_ST" "$T_CMD"
+           p_line "${C_DIM}  ${HDR_N}${C_RESET}" ;;
+        i) [ -n "${HDR_I:-}" ] || printf -v HDR_I '%7s %8s %8s %7s %5s  %-4s %s' \
+               "$T_PID" "IO" "$T_CPU" "$T_MEMCOL" "$T_THR" "$T_ST" "$T_CMD"
+           p_line "${C_DIM}  ${HDR_I}${C_RESET}" ;;
+        *) [ -n "${HDR_STD:-}" ] || printf -v HDR_STD '%7s %8s %7s %5s  %-4s %s' \
+               "$T_PID" "$T_CPU" "$T_MEMCOL" "$T_THR" "$T_ST" "$T_CMD"
+           p_line "${C_DIM}  ${HDR_STD}${C_RESET}" ;;
+    esac
+    # 进程行前缀宽度: 标准模式 39 字符; n/i 模式多一列 " %8s" 共 48 字符。
+    # 各留 1 列余量 —— 原写法固定 W-44, 在 n/i 模式下会超出终端宽度而折行。
+    case "$CV_PROC_MODE" in
+        n|i) proc_wid=$(( W - 49 )) ;;
+        *)   proc_wid=$(( W - 40 )) ;;
+    esac
     printf '%s\n' "$MV_PROCS" | awk -F'|' \
         -v dim="$C_DIM" -v rs="$C_RESET" -v gr="$C_GREEN" -v rd="$C_RED" -v yl="$C_YELLOW" \
-        -v wid="$(( W - 44 ))" -v tty="$IS_TTY" -v mcol="$CV_PROC_MODE" '
+        -v wid="$proc_wid" -v tty="$IS_TTY" -v mcol="$CV_PROC_MODE" '
     NF >= 6 {
         cmd = ""
         if (NF >= 8) { for (i = 8; i <= NF; i++) cmd = cmd (i > 8 ? "|" : "") $i }
@@ -2185,7 +2176,12 @@ EOF
         is_num "${alertn:-}" || alertn=0
     fi
     if [ "$alertn" -gt 0 ]; then ac="$C_RED"; else ac="$C_DIM"; fi
-    p_line "  ${C_DIM}${T_KEYS}${C_RESET}   ${C_DIM}${T_REFRESH} ${INTERVAL}s${C_RESET}   ${C_DIM}${T_RENDER} ${RENDER_MS}ms${C_RESET}   ${ac}${T_ALERT} ${alertn}${C_RESET}"
+    # 窄终端省去完整键位提示(按 ? 仍可看帮助), 否则底栏会超出 W 折行
+    if [ "$NARROW" = "1" ]; then
+        p_line "  ${C_DIM}${T_REFRESH} ${INTERVAL}s${C_RESET}   ${C_DIM}${T_RENDER} ${RENDER_MS}ms${C_RESET}   ${ac}${T_ALERT} ${alertn}${C_RESET}   ${C_DIM}[?]${C_RESET}"
+    else
+        p_line "  ${C_DIM}${T_KEYS}${C_RESET}   ${C_DIM}${T_REFRESH} ${INTERVAL}s${C_RESET}   ${C_DIM}${T_RENDER} ${RENDER_MS}ms${C_RESET}   ${ac}${T_ALERT} ${alertn}${C_RESET}"
+    fi
     [ "$IS_TTY" = "1" ] && printf '\033[J'
     return 0
 }
@@ -2610,7 +2606,7 @@ do_uninstall() {
 
 do_upgrade() {
     need_root "--upgrade" || return 1
-    local self
+    local self bak=""
     self=$(resolve_self)
     [ -r "$self" ] || { printf '%s\n' "错误: 无法读取脚本自身" >&2; return 1; }
     if ! bash -n "$self" 2>/dev/null; then
@@ -2620,7 +2616,16 @@ do_upgrade() {
     if [ "$BIN_PATH" -ef "$self" ] 2>/dev/null; then
         printf '提示: %s 已是当前文件, 无需升级\n' "$BIN_PATH"
     else
-        [ -f "$BIN_PATH" ] && cp "$BIN_PATH" "$BIN_PATH.bak" 2>/dev/null
+        # 备份必须成功才继续, 否则一旦 install_self 覆盖失败就没有回退路径;
+        # 同时只有真正备份了才打印"已备份", 避免提示与事实不符。
+        if [ -f "$BIN_PATH" ]; then
+            if cp "$BIN_PATH" "$BIN_PATH.bak" 2>/dev/null; then
+                bak="$BIN_PATH.bak"
+            else
+                printf '%s\n' "错误: 无法备份 $BIN_PATH (磁盘已满或权限不足), 已中止升级" >&2
+                return 1
+            fi
+        fi
         install_self "$self" || return 1
         chmod 755 "$BIN_PATH" 2>/dev/null
     fi
@@ -2628,7 +2633,8 @@ do_upgrade() {
         systemctl daemon-reload 2>/dev/null
         systemctl restart htop-s.service 2>/dev/null
     fi
-    printf '%s\n' "升级完成 (旧版备份在 $BIN_PATH.bak)"
+    printf '%s\n' "升级完成"
+    [ -n "$bak" ] && printf '%s\n' "旧版已备份: $bak"
     return 0
 }
 
@@ -2777,17 +2783,6 @@ do_ensure_acct() {
 #===============================================================================
 # 20. 查询命令
 #===============================================================================
-csv_hb() {
-    awk '{
-        v = $1 + 0
-        if (v >= 1099511627776) { r = v % 1099511627776; u = v / 1099511627776; printf "%d.%dTB", u, r * 10 / 1099511627776 }
-        else if (v >= 1073741824) { r = v % 1073741824; u = v / 1073741824; printf "%d.%dGB", u, r * 10 / 1073741824 }
-        else if (v >= 1048576) { r = v % 1048576; u = v / 1048576; printf "%d.%dMB", u, r * 10 / 1048576 }
-        else if (v >= 1024) { r = v % 1024; u = v / 1024; printf "%d.%dKB", u, r * 10 / 1024 }
-        else printf "%dB", v
-    }'
-}
-
 do_log() {
     local n="$1" f
     if [ ! -d "$LOG_DIR" ]; then
