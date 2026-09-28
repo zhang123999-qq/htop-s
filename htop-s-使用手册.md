@@ -1,7 +1,7 @@
 # htop-s 使用手册
 
 > Linux 服务器实时监控终端面板 · 部署 / 指令 / 排错
-> 版本：0.0.6　|　适用：Debian / Ubuntu / CentOS / Rocky / Alma / Alpine
+> 版本：0.0.7　|　适用：Debian / Ubuntu / CentOS / Rocky / Alma / Alpine
 
 ---
 
@@ -66,7 +66,7 @@ curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/ins
 curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- --service
 
 # 指定版本 / 走代理
-curl -fsSL -x http://127.0.0.1:10808 https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.6
+curl -fsSL -x http://127.0.0.1:10808 https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.7
 ```
 
 安装器会依次做五件事：环境检查（Linux / bash 版本 / 下载工具）→ 准备目录 →
@@ -193,6 +193,21 @@ sudo reboot
 htop-s --status
 ```
 
+### 3.4 自适应刷新（默认开启）
+
+服务器负载高时，面板会自动降低刷新频率，避免"监控脚本自己拖慢服务器"：
+
+| 条件 | 动作 |
+|---|---|
+| CPU ≥ 85%，连续 3 帧 | 刷新间隔降一档：1s → 2s → 5s |
+| CPU ≤ 60%，连续 5 帧 | 刷新间隔升一档，逐步恢复 |
+
+中间地带（60%~85%）不动作，连续帧计数防止负载抖动时来回跳档。
+
+- 手动调过刷新间隔（`-i` / `+` / `-`）后自动关闭自适应，手动优先
+- 面板内按 `a` 可随时开关；当前档位显示在底栏
+- 启动参数 `--adaptive` / `--no-adaptive`，或配置文件 `adaptive=0` 永久关闭
+
 ---
 
 ## 4. 面板逐区解读
@@ -202,6 +217,8 @@ htop-s --status
 ### 4.1 主机信息
 
 主机名、当前时间、已运行时长、CPU 核数、发行版 / 内核 / 架构。
+
+已运行时长会省略无意义的零段：`23小时33分`（而不是 `0天23小时33分`），刚开机则显示 `58分`。
 
 ### 4.2 系统概况
 
@@ -310,7 +327,7 @@ UDP  37  InErr 0 · RcvbufErr 0
 | **TIME_WAIT** | 几万以内正常 | 超过 30000 需关注，说明短连接过于频繁 |
 | **SYN_RECV** | 接近 0 | **上百就危险**：SYN Flood 攻击或端口扫描 |
 | **CLOSE_WAIT** | 接近 0 | **超过几百就是程序 bug**：代码没关连接 |
-| 重传率 | < 1% | > 5% 网络质量差 |
+| 重传率 | < 1% | > 5% 网络质量差。显示为 `15.55% (14/90)`，括号里是本周期重传包数/总包数 —— 包数太少时百分比没有意义，看括号 |
 | ListenDrop / 半连接溢出 | 0 | 非零说明应用来不及处理新连接 |
 | conntrack | < 80% | 接近上限会导致**新连接直接失败** |
 
@@ -351,6 +368,7 @@ UDP  37  InErr 0 · RcvbufErr 0
 | `htop-s -n` | 输出一次快照就退出（排障 / 配合 grep） |
 | `htop-s -m` | 精简模式：只显示流量和连接 |
 | `htop-s -p` | 显示「端口 → 进程」映射（非交互场景用；需 root 才能看到其他用户的进程） |
+| `htop-s --adaptive` / `--no-adaptive` | 开启 / 关闭自适应刷新（默认开启，见 3.4） |
 
 ### 部署与生命周期
 
@@ -417,6 +435,7 @@ UDP  37  InErr 0 · RcvbufErr 0
 | `1` | 展开 / 收起每核视图 |
 | `p` | 展开 / 收起「端口 → 进程」映射 |
 | `+` / `-` | 刷新间隔 ±1 秒 |
+| `a` | 自适应刷新开 / 关（见 3.4） |
 | `s` | 把当前快照存入日志 |
 | `?` | 帮助浮层 |
 
@@ -902,7 +921,7 @@ nohup htop-s --daemon >/dev/null 2>&1 &
 ```bash
 htop-s --check-update        # 只检查, 不安装
 sudo htop-s --update         # 更新到最新版
-sudo htop-s --update=0.0.6   # 更新到指定版本
+sudo htop-s --update=0.0.7   # 更新到指定版本
 sudo htop-s --update --force # 版本相同也强制重装
 ```
 

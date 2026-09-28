@@ -68,7 +68,7 @@ curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/ins
 curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- --service
 
 # 指定版本
-curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.6
+curl -fsSL https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash -s -- -v 0.0.7
 
 # 国内网络走代理
 curl -fsSL -x http://127.0.0.1:10808 https://github.com/zhang123999-qq/htop-s/releases/latest/download/install.sh | sudo bash
@@ -95,7 +95,7 @@ scp htop-s user@server:/tmp/ && ssh user@server 'chmod +x /tmp/htop-s && /tmp/ht
 ```bash
 htop-s --check-update            # 看看有没有新版本
 sudo htop-s --update             # 从 Release 拉取最新版并重启服务
-sudo htop-s --update=0.0.6       # 更新到指定版本
+sudo htop-s --update=0.0.7       # 更新到指定版本
 sudo htop-s --update --force     # 版本相同时也强制重装
 
 sudo htop-s --uninstall          # 移除服务与脚本, 保留日志与流量数据
@@ -144,7 +144,7 @@ htop-s --export           # 结构化 CSV, 便于程序解析
 磁盘容量/IO/inode → 网卡累计与实时带宽 + 曲线 → 流量配额 → TCP 状态 → UDP →
 监听端口与 TOP 对端 → 进程 TOP。
 
-按键：`q` 退出 · `空格` 暂停 · `c/m/n/i` 排序（CPU/内存/连接数/IO）· `1` 每核 · `p` 端口映射 · `?` 帮助
+按键：`q` 退出 · `空格` 暂停 · `c/m/n/i` 排序（CPU/内存/连接数/IO）· `1` 每核 · `p` 端口映射 · `a` 自适应刷新开关 · `?` 帮助
 
 终端宽度不足 60 列时自动进入紧凑模式（隐藏每核、端口映射、磁盘 IO 三个次要分区）。
 
