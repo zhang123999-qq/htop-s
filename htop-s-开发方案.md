@@ -1517,7 +1517,7 @@ https://github.com/<owner>/<repo>/releases/latest/download/<asset>
 $EDITOR htop-s              # VERSION="0.0.6"
 
 # 2. 自测
-htop-s --selftest              # 内置 51 项, 任何环境都能跑
+htop-s --selftest              # 内置 70 项, 任何环境都能跑
 bash tests/run-tests.sh        # 本地开发环境专用; tests/ 不随仓库分发
 
 # 3. 提交
@@ -1615,5 +1615,5 @@ git push origin main
 #### 副作用与应对
 
 `tests/` 移出仓库后，从远程克隆的人无法复现集成测试。应对方式：
-`htop-s --selftest` 内置 **51 项自测且不依赖任何外部文件**，作为仓库内可用的最低验证手段。
+`htop-s --selftest` 内置 **70 项自测且不依赖任何外部文件**，作为仓库内可用的最低验证手段。
 README 与开发流程中涉及 `tests/` 的段落均已加注说明。

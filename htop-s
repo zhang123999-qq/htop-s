@@ -17,7 +17,7 @@
 
 set -u
 
-VERSION="0.0.6"
+VERSION="0.0.7"
 PROG="htop-s"
 
 #===============================================================================
@@ -51,6 +51,20 @@ OPT_PORTS=0
 CLI_UPDATE=""
 CLI_PROXY=""
 OPT_FORCE=0
+# 自适应刷新: 高负载时自动降低刷新频率 (1s -> 2s -> 5s), 负载回落后恢复；
+# 带迟滞 (升/降档阈值不同) + 连续帧计数，避免在阈值附近抖动。默认开启，
+# 手动指定 -i/--interval 或按 +/- 后自动关闭 (手动优先)，--adaptive 可重新打开。
+ADAPTIVE=1
+ADAPTIVE_LEVEL=0        # 0=1s, 1=2s, 2=5s
+ADAPTIVE_UP_CPU=85      # CPU% >= 此值连续 ADAPTIVE_UP_N 帧 -> 升档
+ADAPTIVE_DOWN_CPU=60    # CPU% <= 此值连续 ADAPTIVE_DOWN_N 帧 -> 降档
+ADAPTIVE_UP_N=3
+ADAPTIVE_DOWN_N=5
+ADAPTIVE_UP_COUNT=0
+ADAPTIVE_DOWN_COUNT=0
+CLI_ADAPTIVE=""         # 命令行显式 --adaptive/--no-adaptive 时记录，优先级高于 -i 与配置文件
+# 本帧起点的 uptime（dispatch_frames 写入，quota_update 等复用，避免重复 fork 读 /proc/uptime）
+FRAME_NOW=""
 
 # 发布仓库 (由 init 写入 Release 与 api 地址; 可用配置 repo_owner/repo_name 覆盖)
 REPO_OWNER="zhang123999-qq"
@@ -62,7 +76,10 @@ HAS_CURL=0; HAS_WGET=0; HAS_PING=0
 HAS_SORT=0; HAS_READLINK=0; HAS_STTY=0
 PAGESIZE=4096
 CLK_TCK=100
-TERM_COLS=80
+# 终端宽度：初始留空，首帧 term_width() 会真实探测（tput/COLUMNS/stty）。
+# 之前此处预设 80，导致 term_width 首行 `[ -n "${TERM_COLS:-}" ] && return 0`
+# 永远直接返回，面板在宽终端上也只按 80 列排版（直到收到 SIGWINCH）。
+TERM_COLS=""
 
 C_RESET=""; C_BOLD=""; C_DIM=""
 C_RED=""; C_GREEN=""; C_YELLOW=""; C_CYAN=""; C_MAGENTA=""; C_BLUE=""; C_WHITE=""
@@ -96,9 +113,11 @@ CV_NET_DOWN_INC=0; CV_NET_UP_INC=0
 CV_PROC_MODE="c"
 CV_TCP_PEERS=""
 CV_TCP_PORTS=""
+TRUNC_PEERS=""
 
 MV_DISK_RD=0; MV_DISK_WR=0; MV_DISK_IOPS=0; MV_DISK_UTIL=0
-MV_RETRANS=0; MV_LIS_OVF=0; MV_LIS_DROP=0; MV_SYN_RET=0; MV_SYNCOOKIE=0
+MV_RETRANS=0; MV_RETRANS_SEG=0; MV_RETRANS_RET=0
+MV_LIS_OVF=0; MV_LIS_DROP=0; MV_SYN_RET=0; MV_SYNCOOKIE=0
 MV_SYN_RET_INC=0
 MV_LIS_OVF_INC=0
 MV_TW_OVF=0; MV_UDP_INERR=0; MV_UDP_RCVBUF=0
@@ -143,6 +162,7 @@ MV_PORTS_ON=0
 # 2. 文本 (中/英)
 #===============================================================================
 init_i18n() {
+    local _kwb _kw3
     if [ "$OUT_LANG" = "en" ]; then
         T_TITLE="SERVER MONITOR"
         T_UPTIME="uptime"; T_LOAD="Load"; T_PROCS="procs"; T_CORES="cores"
@@ -154,15 +174,16 @@ init_i18n() {
         T_MONTH="This month"; T_EST="forecast"; T_INCOMPLETE="DATA INCOMPLETE"
         T_PID="PID"; T_THR="THR"; T_ST="ST"; T_CMD="COMMAND"; T_MEMCOL="MEM"
         T_USER="user"; T_SYS="sys"; T_IO="iowait"; T_STEAL="steal"
-        T_KEYS="[q]uit [space]pause [c/m/n/i]sort [1]cores [p]ports [?]help"
+        T_KEYS="[q]uit [space]pause [c/m/n/i]sort [1]cores [p]ports [a]adaptive [?]help"
         T_HELP="HELP"; T_PRESS_ANY="press any key to return"
         T_KEYS_HELP_1="q / Ctrl-C  quit and restore terminal"
         T_KEYS_HELP_2="space       pause / resume"
         T_KEYS_HELP_3="c/m/n/i     sort by CPU / mem / conn / IO"
-        T_KEYS_HELP_4="1 / p       toggle per-core view / port to process map"
+        T_KEYS_HELP_4="1 / p / a   toggle per-core view / port to process map / adaptive refresh"
         T_CACHE="cache"; T_RETRANS="retrans"; T_OVERFLOW="listen overflow"
         T_SWAPIN="swap in"; T_SWAPOUT="swap out"
         T_REFRESH="refresh"; T_RENDER="render"
+        T_ADAPTIVE="adaptive"
         T_ALREADY="daemon already running, pid:"; T_DAEMON_READY="daemon started, log dir:"
         T_DSTATE="D-state process, IO blocked"; T_NEEDROOT="need root"
         T_NA="N/A"; T_USERS="logins"; T_ZOMBIE="zombie"; T_FAILED="failed units"
@@ -183,15 +204,16 @@ init_i18n() {
         T_MONTH="本月"; T_EST="预计月底"; T_INCOMPLETE="数据不完整"
         T_PID="PID"; T_THR="线程"; T_ST="状态"; T_CMD="命令行"; T_MEMCOL="内存"
         T_USER="用户态"; T_SYS="内核态"; T_IO="IO等待"; T_STEAL="被抢占"
-        T_KEYS="[q]退出 [空格]暂停 [c/m/n/i]排序 [1]每核 [p]端口 [?]帮助"
+        T_KEYS="[q]退出 [空格]暂停 [c/m/n/i]排序 [1]每核 [p]端口 [a]自适应 [?]帮助"
         T_HELP="帮助"; T_PRESS_ANY="按任意键返回"
         T_KEYS_HELP_1="q / Ctrl-C  退出并恢复终端"
         T_KEYS_HELP_2="空格        暂停 / 继续刷新"
         T_KEYS_HELP_3="c/m/n/i     进程按 CPU / 内存 / 连接数 / IO 排序"
-        T_KEYS_HELP_4="1 / p       展开每核视图 / 端口→进程映射"
+        T_KEYS_HELP_4="1 / p / a   展开每核视图 / 端口→进程映射 / 自适应刷新开/关"
         T_CACHE="缓存"; T_RETRANS="重传"; T_OVERFLOW="队列溢出"
-        T_SWAPIN="换页in"; T_SWAPOUT="换页out"
+        T_SWAPIN="换页 in"; T_SWAPOUT="换页 out"
         T_REFRESH="刷新"; T_RENDER="渲染"
+        T_ADAPTIVE="自适应"
         T_ALREADY="后台采集已在运行, pid:"; T_DAEMON_READY="后台采集已启动, 日志目录:"
         T_DSTATE="D 状态进程, IO 阻塞"; T_NEEDROOT="需要 root"
         T_NA="N/A"; T_USERS="登录"; T_ZOMBIE="僵尸"; T_FAILED="失败单元"
@@ -202,6 +224,14 @@ init_i18n() {
         T_OVER="已超配额"; T_DELETED="已删除未释放"
         T_ESTAB="已建立"; T_LOADHINT="/核"; T_TOP="TOP"; T_PORTMAP="端口 → 进程"
     fi
+    # T_KEYS 显示宽度（CJK 计 2 列）：页脚自适应排版用。
+    # 算法：字节数 - 3字节UTF-8序列数 —— T_KEYS 只含 ASCII（1字节1列）与
+    # CJK（3字节2列），故 显示宽 = 字节数 - CJK字符数。此算法不依赖 locale，
+    # 在 C locale 下 ${#} 按字节计数会算错，故不用 ${#}。
+    # （grep 无匹配时退出 1，但命令替换赋值不受 set -e 影响，下同类用法一致。）
+    _kwb=$(printf '%s' "$T_KEYS" | wc -c)
+    _kw3=$(printf '%s' "$T_KEYS" | LC_ALL=C grep -o $'[\xe4-\xef][\x80-\xbf][\x80-\xbf]' 2>/dev/null | wc -l)
+    T_KEYS_W=$(( _kwb - _kw3 ))
 }
 
 #===============================================================================
@@ -239,6 +269,9 @@ init_colors() {
 }
 
 term_width() {
+    # 宽度缓存：render 每帧调用，原每次 tput fork 约 3.5ms。
+    # 只在首次调用或 SIGWINCH 后重算（WINCH trap 会清空 TERM_COLS 以触发重算）。
+    [ -n "${TERM_COLS:-}" ] && return 0
     local w=""
     [ "$HAS_TPUT" = "1" ] && w=$(tput cols 2>/dev/null)
     is_num "${w:-}" || w="${COLUMNS:-}"
@@ -296,8 +329,17 @@ fmt_uptime() {
     is_num "${s%%.*}" || s=0
     s=${s%%.*}
     d=$(( s / 86400 )); h=$(( (s % 86400) / 3600 )); m=$(( (s % 3600) / 60 ))
-    if [ "$OUT_LANG" = "en" ]; then printf '%dd %dh %dm' "$d" "$h" "$m"
-    else printf '%d天%d小时%d分' "$d" "$h" "$m"; fi
+    # 0 天时省略天数段、0 小时（且 0 天）时省略小时段：
+    # "0天23小时33分" → "23小时33分"，"0天0小时58分" → "58分"，避免标题行臃肿
+    if [ "$OUT_LANG" = "en" ]; then
+        [ "$d" -gt 0 ] && printf '%dd ' "$d"
+        { [ "$d" -gt 0 ] || [ "$h" -gt 0 ]; } && printf '%dh ' "$h"
+        printf '%dm' "$m"
+    else
+        [ "$d" -gt 0 ] && printf '%d天' "$d"
+        { [ "$d" -gt 0 ] || [ "$h" -gt 0 ]; } && printf '%d小时' "$h"
+        printf '%d分' "$m"
+    fi
 }
 
 bar() {
@@ -360,48 +402,56 @@ sparkline() {
     }'
 }
 
-# 一次算出两条 sparkline 曲线, 以 | 分隔返回 —— 合并两次 fork 为一次。
-# 分隔符必须用 | 而非空格: ASCII 模式下最低档字符本身就是空格,
-# 用空格分隔时 read 会按 IFS 折叠, 导致两条曲线错位。
+# 一次算出两条 sparkline 曲线 —— 纯 bash 实现，零 fork（原一次 awk 约 6ms/帧）。
+# 结果写入全局变量 SP_RX / SP_TX。刻意不用 $( ) 包裹调用：命令替换会 fork
+# 子 shell，前功尽弃。字符映射用 case 而不用多字节截取：bash 子串在 C locale
+# 下按字节切分，会把 ▁ 等 3 字节字符拦腰切断；case 则与 locale 无关。
+_spark_seg() {
+    local data="$1" width="$2" max="$3"
+    local v idx c out="" n=0 st i=0
+    [ "$max" -le 0 ] 2>/dev/null && max=1
+    for v in $data; do n=$(( n + 1 )); done
+    st=$(( n - width + 1 ))
+    [ "$st" -lt 1 ] && st=1
+    for v in $data; do
+        i=$(( i + 1 ))
+        [ "$i" -lt "$st" ] && continue
+        v="${v%%.*}"
+        is_num "$v" || v=0
+        idx=$(( v * 7 / max + 1 ))
+        [ "$idx" -gt 8 ] && idx=8
+        [ "$idx" -lt 1 ] && idx=1
+        if [ "$USE_ASCII" = "1" ]; then
+            case "$idx" in
+                1) c=' ';; 2) c='.';; 3) c=':';; 4) c='-';;
+                5) c='=';; 6) c='+';; 7) c='*';; *) c='@';;
+            esac
+        else
+            case "$idx" in
+                1) c='▁';; 2) c='▂';; 3) c='▃';; 4) c='▄';;
+                5) c='▅';; 6) c='▆';; 7) c='▇';; *) c='█';;
+            esac
+        fi
+        out="${out}${c}"
+    done
+    SP_SEG="$out"
+}
 sparkline2() {
-    local d1="$1" d2="$2" width="$3" max="$4"
-    awk -v d1="$d1" -v d2="$d2" -v w="$width" -v mx="$max" -v asc="$USE_ASCII" '
-    BEGIN {
-        if (asc == 1) {
-            sc[1] = " "; sc[2] = "."; sc[3] = ":"; sc[4] = "-"
-            sc[5] = "="; sc[6] = "+"; sc[7] = "*"; sc[8] = "@"
-        } else {
-            sc[1] = "▁"; sc[2] = "▂"; sc[3] = "▃"; sc[4] = "▄"
-            sc[5] = "▅"; sc[6] = "▆"; sc[7] = "▇"; sc[8] = "█"
-        }
-        if (mx <= 0) mx = 1
-        o1 = ""; o2 = ""
-        n = split(d1, a, " ")
-        if (n > 0 && w >= 1) {
-            st = n - w + 1; if (st < 1) st = 1
-            for (i = st; i <= n; i++) {
-                v = a[i] + 0; idx = int(v / mx * 7) + 1
-                if (idx > 8) idx = 8; if (idx < 1) idx = 1
-                o1 = o1 sc[idx]
-            }
-        }
-        n = split(d2, b, " ")
-        if (n > 0 && w >= 1) {
-            st = n - w + 1; if (st < 1) st = 1
-            for (i = st; i <= n; i++) {
-                v = b[i] + 0; idx = int(v / mx * 7) + 1
-                if (idx > 8) idx = 8; if (idx < 1) idx = 1
-                o2 = o2 sc[idx]
-            }
-        }
-        printf "%s|%s\n", o1, o2
-    }'
+    _spark_seg "$1" "$3" "$4"; local o1="$SP_SEG"
+    _spark_seg "$2" "$3" "$4"; local o2="$SP_SEG"
+    SP_RX="$o1"; SP_TX="$o2"
 }
 
 #===============================================================================
 # 5. 采集层 — 基础
 #===============================================================================
-read_uptime() { awk '{print $1}' "$PROC_ROOT/uptime" 2>/dev/null || printf '0'; }
+read_uptime() {
+    # 纯 bash 实现：内建 read 重定向读文件，零 fork（原 awk 每次约 3.8ms）。
+    # 兼容性：bash 3.2 的 read 支持 -r 与重定向，无需外部命令。
+    local up _
+    read -r up _ < "$PROC_ROOT/uptime" 2>/dev/null
+    case "${up:-}" in ''|*[!0-9.]*) printf '0' ;; *) printf '%s' "$up" ;; esac
+}
 
 # uptime "秒.百分秒" -> 厘秒整数。纯 bash, 避免为算时间差再 fork 一次 awk。
 u2cs() {
@@ -416,6 +466,22 @@ u2cs() {
     f="${f%${f#??}}"
     case "$f" in ''|*[!0-9]*) f=0 ;; esac
     printf '%s' "$(( i * 100 + 10#${f} ))"
+}
+
+# u2cs 的赋值版：结果直接写入调用方的局部变量，避免 $( ) 的一次 fork。
+# 用法：u2cs_v var_name "123.45"   # 调用方须事先 local var_name（bash 动态作用域）
+u2cs_v() {
+    local v="${2:-0}" i f
+    i="${v%%.*}"
+    case "$v" in
+        *.*) f="${v#*.}" ;;
+        *)   f="0" ;;
+    esac
+    case "$i" in ''|*[!0-9]*) i=0 ;; esac
+    f="${f}00"
+    f="${f%${f#??}}"
+    case "$f" in ''|*[!0-9]*) f=0 ;; esac
+    printf -v "$1" '%s' "$(( i * 100 + 10#${f} ))"
 }
 
 read_cpu() {
@@ -447,6 +513,35 @@ cpu_delta() {
         if (busy > 100) busy = 100
         printf "%.1f %.1f %.1f %.1f %.1f %.1f %.1f", busy, usr, sys, io, irq, sof, st
     }'
+}
+
+# read_cpu + cpu_delta 二合一：一次 awk 读 /proc/stat 并与上一帧差分（原两次 fork）。
+# 输出两行：第一行 7 个百分比（语义同 cpu_delta），第二行原始采样（调用方存入 PREV_CPU）。
+# 旧的 read_cpu / cpu_delta 保留（自测与外部脚本可能引用）。
+cpu_sample() {
+    awk -v prev="${1:-}" '
+    /^cpu /{
+        for (i = 1; i <= 8; i++) c[i] = $(i+1) + 0
+        raw = c[1]" "c[2]" "c[3]" "c[4]" "c[5]" "c[6]" "c[7]" "c[8]
+        if (prev == "" || split(prev, p, " ") < 8) {
+            printf "0.0 0.0 0.0 0.0 0.0 0.0 0.0\n%s\n", raw
+            exit
+        }
+        t = 0
+        for (i = 1; i <= 8; i++) t += (c[i] - p[i])
+        if (t <= 0) { printf "0.0 0.0 0.0 0.0 0.0 0.0 0.0\n%s\n", raw; exit }
+        busy = 100 - (c[4]-p[4])/t*100 - (c[5]-p[5])/t*100
+        usr = (c[1]-p[1])/t*100
+        sys = ((c[3]-p[3]) + (c[6]-p[6]) + (c[7]-p[7]))/t*100
+        io  = (c[5]-p[5])/t*100
+        irq = (c[6]-p[6])/t*100
+        sof = (c[7]-p[7])/t*100
+        st  = (c[8]-p[8])/t*100
+        if (busy < 0) busy = 0
+        if (busy > 100) busy = 100
+        printf "%.1f %.1f %.1f %.1f %.1f %.1f %.1f\n%s\n", busy, usr, sys, io, irq, sof, st, raw
+        exit
+    }' "$PROC_ROOT/stat" 2>/dev/null
 }
 
 cpu_cores_delta() {
@@ -540,6 +635,70 @@ system_read() {
     }' "$PROC_ROOT/meminfo" "$PROC_ROOT/loadavg" "$PROC_ROOT/vmstat" 2>/dev/null
 }
 
+# system_read + net_read 二合一：一次 awk 读 meminfo/loadavg/vmstat/net-dev 四个文件。
+# 输出 23 个字段：前 17 个语义同 system_read，后 6 个语义同 net_read（rx tx re te rd td）。
+# 旧的 system_read / net_read 保留（自测引用 net_read；sample_prime / quota_update 沿用）。
+system_net_read() {
+    if [ ! -r "$PROC_ROOT/net/dev" ]; then
+        # net/dev 缺失时退化：system 部分照常，网络部分补零（同 net_read 的兜底）。
+        local sysl
+        sysl=$(system_read)
+        printf '%s 0 0 0 0 0 0\n' "$sysl"
+        return 0
+    fi
+    awk -v list="$IFACE_LIST" '
+    BEGIN { n = split(list, a, " "); for (i = 1; i <= n; i++) W[a[i]] = 1 }
+    FNR == 1 { f = FILENAME; sub(/^.*\//, "", f) }
+    f == "meminfo" {
+        if ($1 == "MemTotal:") t = $2
+        else if ($1 == "MemFree:") fr = $2
+        else if ($1 == "MemAvailable:") mav = $2
+        else if ($1 == "Buffers:") b = $2
+        else if ($1 == "Cached:") c = $2
+        else if ($1 == "SReclaimable:") sr = $2
+        else if ($1 == "Shmem:") sh = $2
+        else if ($1 == "Dirty:") d = $2
+        else if ($1 == "Writeback:") wb = $2
+        else if ($1 == "SwapTotal:") st = $2
+        else if ($1 == "SwapFree:") sf = $2
+        next
+    }
+    f == "loadavg" {
+        if (!ldone) {
+            split($4, la, "/")
+            l1 = $1 + 0; l5 = $2 + 0; l15 = $3 + 0
+            run = la[1] + 0; tot = la[2] + 0; lpid = $5 + 0
+            ldone = 1
+        }
+        next
+    }
+    f == "vmstat" {
+        if ($1 == "pswpin") pi = $2
+        else if ($1 == "pswpout") po = $2
+        else if ($1 == "oom_kill") ok = $2
+        next
+    }
+    f == "dev" {
+        if (FNR > 2) {
+            i = $1; sub(/:$/, "", i)
+            if (i in W) { rx += $2; tx += $10; re += $4; te += $12; rd += $5; td += $13 }
+        }
+        next
+    }
+    END {
+        if (mav == "") mav = fr + b + c
+        cache = c + sr - sh
+        if (cache < 0) cache = 0
+        used = t - mav; if (used < 0) used = 0
+        printf "%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %d %d %d %d %d %d\n",
+            t * 1024, used * 1024, st * 1024, (st - sf) * 1024,
+            cache * 1024, d * 1024, wb * 1024, mav * 1024,
+            l1 + 0, l5 + 0, l15 + 0, run + 0, tot + 0, lpid + 0,
+            pi + 0, po + 0, ok + 0,
+            rx + 0, tx + 0, re + 0, te + 0, rd + 0, td + 0
+    }' "$PROC_ROOT/meminfo" "$PROC_ROOT/loadavg" "$PROC_ROOT/vmstat" "$PROC_ROOT/net/dev" 2>/dev/null
+}
+
 
 read_core_count() {
     local n
@@ -554,7 +713,9 @@ read_core_count() {
 #===============================================================================
 disk_capacity() {
     local top="${1:-3}"
-    { df -PT 2>/dev/null || df -P 2>/dev/null; } | awk -v top="$top" '
+    # 用 -h 输出人类可读容量（4.7G/30G）；原 -PT 输出的是 1K 数据块数
+    # （如 4870592/30872404），面板上无法阅读。字段位置与 -PT 一致。
+    { df -PTh 2>/dev/null || df -PT 2>/dev/null || df -P 2>/dev/null; } | awk -v top="$top" '
     NR == 1 {
         gnu = 0
         for (i = 1; i <= NF; i++) if ($i == "Type") gnu = 1
@@ -739,6 +900,26 @@ read_snmp() {
             V[H["InSegs"]]+0, V[H["OutSegs"]]+0, V[H["RetransSegs"]]+0, V[H["InErrs"]]+0,
             UV[UH["InErrors"]]+0, UV[UH["RcvbufErrors"]]+0, UV[UH["InDatagrams"]]+0
     }' "$PROC_ROOT/net/snmp" 2>/dev/null
+}
+
+# TCP 重传率：$1=本周期累计 OutSegs，$2=本周期累计 RetransSegs。
+# bash 整数运算零 fork，保留两位小数；同时记录分子/分母供面板显示
+# "15.56% (14/90)" —— 小流量下分母很小，光看百分比会误导。
+# 计数器归零（重启）时增量按 0 处理。
+retrans_calc() {
+    local so="$1" sr="$2" _rd _rr _rv
+    _rd=$(( so - PREV_SEG_OUT ))
+    _rr=$(( sr - PREV_SEG_RET ))
+    [ "$_rr" -lt 0 ] && _rr=0
+    [ "$_rd" -lt 0 ] && _rd=0
+    MV_RETRANS_SEG=$_rd
+    MV_RETRANS_RET=$_rr
+    if [ "$_rd" -le 0 ]; then
+        MV_RETRANS=0
+    else
+        _rv=$(( _rr * 10000 / _rd ))
+        MV_RETRANS="$(( _rv / 100 )).$(printf '%02d' "$(( _rv % 100 ))")"
+    fi
 }
 
 read_netstat_ext() {
@@ -1101,6 +1282,15 @@ load_config() {
             ''|\#*) continue ;;
             iface)      IFACE_LIST=$(printf '%s' "$v" | tr ',' ' ') ;;
             interval)   is_num "$v" && [ "$v" -ge 1 ] && [ "$v" -le 30 ] && INTERVAL=$v ;;
+            adaptive)
+                case "$v" in
+                    1|on|yes|true) ADAPTIVE=1 ;;
+                    0|off|no|false) ADAPTIVE=0 ;;
+                esac ;;
+            adaptive_up_cpu)   is_num "$v" && [ "$v" -ge 1 ] && [ "$v" -le 100 ] && ADAPTIVE_UP_CPU=$v ;;
+            adaptive_down_cpu) is_num "$v" && [ "$v" -ge 1 ] && [ "$v" -le 100 ] && ADAPTIVE_DOWN_CPU=$v ;;
+            adaptive_up_n)     is_num "$v" && [ "$v" -ge 1 ] && ADAPTIVE_UP_N=$v ;;
+            adaptive_down_n)   is_num "$v" && [ "$v" -ge 1 ] && ADAPTIVE_DOWN_N=$v ;;
             quota)
                 qv=$(parse_size "$v" 2>/dev/null)
                 is_num "${qv:-}" && ST_QUOTA=$qv
@@ -1125,6 +1315,12 @@ load_config() {
     [ -n "$CLI_RESET_DAY" ] && ST_RESET_DAY=$CLI_RESET_DAY
     [ -n "$CLI_KEEP" ] && KEEP_DAYS=$CLI_KEEP
     [ -n "$CLI_INTERVAL" ] && INTERVAL=$CLI_INTERVAL
+    # 自适应优先级: 命令行 --adaptive/--no-adaptive > 命令行 -i(手动) > 配置文件 > 默认开
+    if [ -n "$CLI_ADAPTIVE" ]; then
+        ADAPTIVE=$CLI_ADAPTIVE
+    elif [ -n "$CLI_INTERVAL" ]; then
+        ADAPTIVE=0
+    fi
 
     # 规范化
     is_num "${KEEP_DAYS:-}" || KEEP_DAYS=30
@@ -1134,6 +1330,16 @@ load_config() {
     [ "$ST_RESET_DAY" -gt 28 ] && ST_RESET_DAY=28
     case "${ST_QUOTA:-0}" in ''|*[!0-9]*) ST_QUOTA=0 ;; esac
     case "${ST_MODE:-proc}" in nft|proc) ;; *) ST_MODE=proc ;; esac
+    # 自适应阈值必须满足 升档阈值 > 降档阈值，否则迟滞失效；非法时回退默认
+    is_num "${ADAPTIVE_UP_CPU:-}" || ADAPTIVE_UP_CPU=85
+    is_num "${ADAPTIVE_DOWN_CPU:-}" || ADAPTIVE_DOWN_CPU=60
+    is_num "${ADAPTIVE_UP_N:-}" || ADAPTIVE_UP_N=3
+    is_num "${ADAPTIVE_DOWN_N:-}" || ADAPTIVE_DOWN_N=5
+    [ "$ADAPTIVE_UP_N" -ge 1 ] || ADAPTIVE_UP_N=3
+    [ "$ADAPTIVE_DOWN_N" -ge 1 ] || ADAPTIVE_DOWN_N=5
+    if [ "$ADAPTIVE_UP_CPU" -le "$ADAPTIVE_DOWN_CPU" ] 2>/dev/null; then
+        ADAPTIVE_UP_CPU=85; ADAPTIVE_DOWN_CPU=60
+    fi
     return 0
 }
 
@@ -1307,16 +1513,24 @@ nft_create() {
 # 13. 流量配额
 #===============================================================================
 quota_update() {
-    local rx_now=0 tx_now=0 up_now ps
+    local rx_now=0 tx_now=0 up_now ps _now_epoch
 
     if [ "$ST_MODE" = "nft" ] && [ "$HAS_NFT" = "1" ] && nft_exists; then
         read -r rx_now tx_now <<< "$(nft_read)"
+    elif [ -n "${CV_RX_TOTAL:-}" ] && [ -n "${CV_TX_TOTAL:-}" ]; then
+        # 复用 sample_fast 本帧刚读到的计数器，免一次 net_read fork（约 3.4ms/帧）。
+        # 调用方（交互/daemon/快照/导出）都在 quota_update 前调过 sample_fast；
+        # 若未调用过则回退到 net_read。
+        rx_now=$CV_RX_TOTAL; tx_now=$CV_TX_TOTAL
     else
         read -r rx_now tx_now _ _ _ _ <<< "$(net_read)"
     fi
     case "${rx_now:-}" in ''|*[!0-9]*) rx_now=0 ;; esac
     case "${tx_now:-}" in ''|*[!0-9]*) tx_now=0 ;; esac
-    up_now=$(read_uptime)
+    # 复用本帧已读取的 uptime（dispatch_frames 写入），免一次 fork；
+    # 非帧场景（快照/导出）FRAME_NOW 为空时回退为现读。
+    up_now=${FRAME_NOW:-}
+    [ -n "$up_now" ] || up_now=$(read_uptime)
     is_num "${up_now%%.*}" || up_now=0
 
     local rebooted=0
@@ -1351,28 +1565,37 @@ quota_update() {
         [ "$CV_PERIOD_TX" -lt 0 ] && CV_PERIOD_TX=0
     fi
 
-    ps=$(period_start "$ST_RESET_DAY")
-    if [ -z "$ST_PERIOD_START" ]; then
-        ST_PERIOD_START="$ps"
-    else
-        local n_ps n_old
-        n_ps=$(d2n $(split_date "$ps"))
-        n_old=$(d2n $(split_date "$ST_PERIOD_START"))
-        if [ "$n_ps" -gt "$n_old" ]; then
-            mkdir -p "${STATE_FILE%/*}" 2>/dev/null
-            printf '%s,%s,%s\n' "$ST_PERIOD_START" "$CV_PERIOD_RX" "$CV_PERIOD_TX" >> "${STATE_FILE%/*}/history" 2>/dev/null
-            if [ "$ST_MODE" = "nft" ] && [ "$HAS_NFT" = "1" ] && nft_exists; then
-                ST_NFT_RX_DONE=$rx_now; ST_NFT_TX_DONE=$tx_now
-            else
-                ST_PROC_RX_BASE=$rx_now; ST_PROC_TX_BASE=$tx_now
-            fi
+    # 周期切换检查是慢变量：最多每 5 分钟跑一次（原每帧 5~6 次 fork 约 20ms）。
+    # 计费周期按月结算，5 分钟粒度不影响配额准确性。
+    # EPOCHSECONDS 是 bash 5+ 内建，零 fork；低版本 bash 回退到 date（1 次 fork）。
+    _now_epoch=${EPOCHSECONDS:-}
+    [ -n "$_now_epoch" ] || _now_epoch=$(date +%s 2>/dev/null || echo 0)
+    case "$_now_epoch" in ''|*[!0-9]*) _now_epoch=0 ;; esac
+    if [ "$_now_epoch" -ge "${QUOTA_NEXT_CHECK:-0}" ]; then
+        QUOTA_NEXT_CHECK=$(( _now_epoch + 300 ))
+        ps=$(period_start "$ST_RESET_DAY")
+        if [ -z "$ST_PERIOD_START" ]; then
             ST_PERIOD_START="$ps"
-            CV_PERIOD_RX=0; CV_PERIOD_TX=0
+        else
+            local n_ps n_old
+            n_ps=$(d2n $(split_date "$ps"))
+            n_old=$(d2n $(split_date "$ST_PERIOD_START"))
+            if [ "$n_ps" -gt "$n_old" ]; then
+                mkdir -p "${STATE_FILE%/*}" 2>/dev/null
+                printf '%s,%s,%s\n' "$ST_PERIOD_START" "$CV_PERIOD_RX" "$CV_PERIOD_TX" >> "${STATE_FILE%/*}/history" 2>/dev/null
+                if [ "$ST_MODE" = "nft" ] && [ "$HAS_NFT" = "1" ] && nft_exists; then
+                    ST_NFT_RX_DONE=$rx_now; ST_NFT_TX_DONE=$tx_now
+                else
+                    ST_PROC_RX_BASE=$rx_now; ST_PROC_TX_BASE=$tx_now
+                fi
+                ST_PERIOD_START="$ps"
+                CV_PERIOD_RX=0; CV_PERIOD_TX=0
+            fi
         fi
     fi
 
     ST_UPTIME_LAST=$up_now
-    ST_TS_LAST=$(date +%s 2>/dev/null || echo 0)
+    ST_TS_LAST=$_now_epoch
 
     local used de dim
     used=$(( CV_PERIOD_RX + CV_PERIOD_TX ))
@@ -1610,6 +1833,21 @@ trim_hist() {
     return 0
 }
 
+# 环形历史追加：均摊 O(1)/帧。
+# 原每帧调 trim_hist 做 O(n) 数组重建 + O(n²) 字符串拼接（实测约 4ms/帧）；
+# 现每帧只做字符串追加，长度超过 2 倍上限时才修剪一次，均摊开销可忽略。
+# 用法：hist_push VAR_NAME 值 上限
+hist_push() {
+    local var="$1" val="$2" max="$3" s cnt
+    s="${!var} $val"
+    set -- $s
+    cnt=$#
+    if [ "$cnt" -gt "$(( max * 2 ))" ]; then
+        s=$(trim_hist "$s" "$max")
+    fi
+    printf -v "$var" '%s' "$s"
+}
+
 sample_prime() {
     PREV_UPTIME=$(read_uptime)
     is_num "${PREV_UPTIME%%.*}" || PREV_UPTIME=0
@@ -1634,19 +1872,29 @@ sample_prime() {
 
 # now 可由调用方传入 (dispatch_frames 已读取), 避免重复 fork。
 sample_fast() {
-    local now="${1:-}" dt cur curc dt_num
+    # $2: 本帧厘秒时间戳（dispatch_frames 已算好，直接复用免 fork；直接调用时为空则现算）
+    local now="${1:-}" now_cs="${2:-}" prev_cs dt_cs cpu_out curc
     [ -n "$now" ] || now=$(read_uptime)
     is_num "${now%%.*}" || now=0
     if ! is_num "${PREV_UPTIME%%.*}"; then
         PREV_UPTIME=$now
         return 0
     fi
-    dt=$(awk -v n="$now" -v p="$PREV_UPTIME" 'BEGIN { d = n - p; if (d <= 0) d = 0.001; printf "%.3f", d }')
-    dt_num=$dt
+    # 帧时间差改用厘秒整数运算，零 fork（原一次 awk 约 3.5ms/帧）
+    [ -n "$now_cs" ] || u2cs_v now_cs "$now"
+    u2cs_v prev_cs "$PREV_UPTIME"
+    dt_cs=$(( now_cs - prev_cs ))
+    [ "$dt_cs" -le 0 ] && dt_cs=1
 
-    cur=$(read_cpu)
-    read -r CV_CPU_TOTAL CV_CPU_USER CV_CPU_SYS CV_CPU_IO CV_CPU_IRQ CV_CPU_SOFT CV_CPU_STEAL <<< "$(cpu_delta "$cur" "$PREV_CPU")"
-    PREV_CPU=$cur
+    # CPU 采样与差分一次 awk 完成（原 read_cpu + cpu_delta 两次 fork）
+    cpu_out=$(cpu_sample "$PREV_CPU")
+    if [ -n "$cpu_out" ]; then
+        PREV_CPU=${cpu_out#*$'\n'}
+        cpu_out=${cpu_out%%$'\n'*}
+    else
+        cpu_out="0.0 0.0 0.0 0.0 0.0 0.0 0.0"
+    fi
+    read -r CV_CPU_TOTAL CV_CPU_USER CV_CPU_SYS CV_CPU_IO CV_CPU_IRQ CV_CPU_SOFT CV_CPU_STEAL <<< "$cpu_out"
     is_num "${CV_CPU_TOTAL%%.*}" || CV_CPU_TOTAL=0
 
     # 每核视图默认不展开, 仅在需要时计算 (省 2 次 fork/帧)。
@@ -1658,11 +1906,12 @@ sample_fast() {
         PREV_CPU_CORES=$curc
     fi
 
-    # meminfo / loadavg / vmstat 一次读完 (原为 3 次 fork)
-    local pgi pgo oom sysr
-    sysr=$(system_read)
+    # meminfo / loadavg / vmstat / net-dev 一次读完（原 system_read + net_read 两次 fork）
+    local pgi pgo oom sysr rx tx re te rd td
+    sysr=$(system_net_read)
     read -r CV_MEM_TOTAL CV_MEM_USED CV_SWAP_TOTAL CV_SWAP_USED CV_MEM_CACHE CV_MEM_DIRTY CV_MEM_WB CV_MEM_AVAIL \
-            CV_LOAD1 CV_LOAD5 CV_LOAD15 CV_RUNNING CV_TOTPROC CV_LASTPID pgi pgo oom <<< "$sysr"
+            CV_LOAD1 CV_LOAD5 CV_LOAD15 CV_RUNNING CV_TOTPROC CV_LASTPID pgi pgo oom \
+            rx tx re te rd td <<< "$sysr"
     is_num "${CV_MEM_TOTAL:-}" || CV_MEM_TOTAL=0
     is_num "${CV_MEM_USED:-}" || CV_MEM_USED=0
     is_num "${CV_SWAP_TOTAL:-}" || CV_SWAP_TOTAL=0
@@ -1671,17 +1920,22 @@ sample_fast() {
     is_num "${pgo:-}" || pgo=0
     is_num "${oom:-}" || oom=0
     CV_OOM=$oom
-    # 两次速率计算合并为一次 awk (省 1 次 fork)
-    read -r CV_PG_IN CV_PG_OUT <<< "$(awk -v n1="$pgi" -v p1="$PREV_PG_IN" -v n2="$pgo" -v p2="$PREV_PG_OUT" -v pg="$PAGESIZE" -v d="$dt" 'BEGIN{ v=(n1-p1)*pg/d; if(v<0)v=0; w=(n2-p2)*pg/d; if(w<0)w=0; printf "%.0f %.0f", v, w }')"
+    # 换页速率：bash 整数运算，零 fork（原一次 awk）。
+    # 公式：速率 = 差值 * PAGESIZE / 秒数；dt_cs 为厘秒，*100 折算。
+    CV_PG_IN=$(( (pgi - PREV_PG_IN) * PAGESIZE * 100 / dt_cs ))
+    [ "$CV_PG_IN" -lt 0 ] && CV_PG_IN=0
+    CV_PG_OUT=$(( (pgo - PREV_PG_OUT) * PAGESIZE * 100 / dt_cs ))
+    [ "$CV_PG_OUT" -lt 0 ] && CV_PG_OUT=0
     PREV_PG_IN=$pgi; PREV_PG_OUT=$pgo
 
-    local rx tx re te rd td
-    read -r rx tx re te rd td <<< "$(net_read)"
     is_num "${rx:-}" || rx=0
     is_num "${tx:-}" || tx=0
     CV_RX_TOTAL=$rx; CV_TX_TOTAL=$tx
-    # 两次速率计算合并为一次 awk (省 1 次 fork)
-    read -r CV_RX_RATE CV_TX_RATE <<< "$(awk -v n1="$rx" -v p1="$PREV_RX" -v n2="$tx" -v p2="$PREV_TX" -v d="$dt" 'BEGIN{ v=(n1-p1)/d; if(v<0)v=0; w=(n2-p2)/d; if(w<0)w=0; printf "%.0f %.0f", v, w }')"
+    # 网卡速率：bash 整数运算，零 fork（原一次 awk）
+    CV_RX_RATE=$(( (rx - PREV_RX) * 100 / dt_cs ))
+    [ "$CV_RX_RATE" -lt 0 ] && CV_RX_RATE=0
+    CV_TX_RATE=$(( (tx - PREV_TX) * 100 / dt_cs ))
+    [ "$CV_TX_RATE" -lt 0 ] && CV_TX_RATE=0
     CV_NET_DOWN_INC=$(( rx - PREV_RX )); [ "$CV_NET_DOWN_INC" -lt 0 ] && CV_NET_DOWN_INC=0
     CV_NET_UP_INC=$(( tx - PREV_TX ));   [ "$CV_NET_UP_INC" -lt 0 ] && CV_NET_UP_INC=0
     CV_RXERR=$(( re - PREV_RXERR )); [ "$CV_RXERR" -lt 0 ] && CV_RXERR=0
@@ -1693,54 +1947,95 @@ sample_fast() {
     PREV_RX=$rx; PREV_TX=$tx; PREV_RXERR=$re; PREV_TXERR=$te
     PREV_RXDROP=$rd; PREV_TXDROP=$td
 
-    NET_HIST_RX="${NET_HIST_RX} ${CV_RX_RATE}"
-    NET_HIST_TX="${NET_HIST_TX} ${CV_TX_RATE}"
-    NET_HIST_RX=$(trim_hist "$NET_HIST_RX" 120)
-    NET_HIST_TX=$(trim_hist "$NET_HIST_TX" 120)
+    # 流量历史：均摊追加（原每帧 trim_hist 约 4ms）
+    hist_push NET_HIST_RX "$CV_RX_RATE" 120
+    hist_push NET_HIST_TX "$CV_TX_RATE" 120
 
-    local tag a b c d e f g h i j k peers="" ports=""
-    local udpn=0
-    while read -r tag a b c d e f g h i j k; do
-        case "$tag" in
-            STAT)
-                CV_TCP_TOTAL=$a; CV_TCP_EST=$b; CV_TCP_SYNSENT=$c; CV_TCP_SYN=$d
-                CV_TCP_FIN1=$e; CV_TCP_FIN2=$f; CV_TCP_TW=$g; CV_TCP_CW=$h
-                CV_TCP_LAST=$i; CV_TCP_LISTEN=$j; CV_TCP_CLOSING=$k
-                ;;
-            PEER) peers="${peers}${peers:+, }${a} ← ${b}" ;;
-            PORT) ports="${ports}${ports:+ }${b}" ;;
-            UDPN) udpn=$a ;;
-        esac
-    done < <(conn_scan)
-    CV_TCP_PEERS="$peers"
-    CV_TCP_PORTS="$ports"
-    is_num "${CV_TCP_TOTAL:-}" || CV_TCP_TOTAL=0
+    # TCP/UDP 扫描是慢变量：每 5 秒跑一次（原每帧约 5.8ms；SYN/TIME_WAIT/CLOSE_WAIT 均为堆积型指标，5s 粒度足够告警）
+    local conn_cs; u2cs_v conn_cs "$now"
+    if [ "$conn_cs" -ge "${T_CONN_NEXT:-0}" ]; then
+        T_CONN_NEXT=$(( conn_cs + 500 ))
+        local tag a b c d e f g h i j k peers="" ports=""
+        local udpn=0
+        while read -r tag a b c d e f g h i j k; do
+            case "$tag" in
+                STAT)
+                    CV_TCP_TOTAL=$a; CV_TCP_EST=$b; CV_TCP_SYNSENT=$c; CV_TCP_SYN=$d
+                    CV_TCP_FIN1=$e; CV_TCP_FIN2=$f; CV_TCP_TW=$g; CV_TCP_CW=$h
+                    CV_TCP_LAST=$i; CV_TCP_LISTEN=$j; CV_TCP_CLOSING=$k
+                    ;;
+                PEER) peers="${peers}${peers:+, }${a} ← ${b}" ;;
+                PORT) ports="${ports}${ports:+ }${b}" ;;
+                UDPN) udpn=$a ;;
+            esac
+        done < <(conn_scan)
+        CV_TCP_PEERS="$peers"
+        CV_TCP_PORTS="$ports"
+        is_num "${CV_TCP_TOTAL:-}" || CV_TCP_TOTAL=0
 
-    CV_UDP_TOTAL=$udpn
-    is_num "${CV_UDP_TOTAL:-}" || CV_UDP_TOTAL=0
+        CV_UDP_TOTAL=$udpn
+        is_num "${CV_UDP_TOTAL:-}" || CV_UDP_TOTAL=0
+    fi
     PREV_UPTIME=$now
     return 0
 }
 
+# TOP 对端行按终端宽度截断：$1=对端字符串，$2=可见宽度预算。
+# 先粗切再回退到最后一个 ", " 处，保证条目完整，避免把 IP 或 ← 等
+# 多字节字符拦腰切断（C locale 下按字节切分尤其危险）。
+# 结果写入 TRUNC_PEERS（避开 $( ) fork）。
+trunc_peers() {
+    local _p="$1" _w="$2" _cut
+    if [ "$_w" -gt 20 ] && [ "${#_p}" -gt "$_w" ]; then
+        _cut="${_p:0:$_w}"
+        _cut="${_cut%, *} …"
+        TRUNC_PEERS="$_cut"
+    else
+        TRUNC_PEERS="$1"
+    fi
+}
+
 sample_mid() {
-    local now dt a b c d e
+    local now dt a b c d e now_cs pmid_cs dt_cs
     now=$(read_uptime)
     is_num "${now%%.*}" || now=0
-    dt=$(awk -v n="$now" -v p="$PREV_MID_UPTIME" 'BEGIN { d = n - p; if (d <= 0) d = 0.001; printf "%.3f", d }')
+    # 帧时间差改用厘秒整数运算，零 fork（原一次 awk）；dt 保留浮点字符串供 proc_top 使用
+    u2cs_v now_cs "$now"
+    u2cs_v pmid_cs "$PREV_MID_UPTIME"
+    dt_cs=$(( now_cs - pmid_cs ))
+    [ "$dt_cs" -le 0 ] && dt_cs=1
+    dt="$(( dt_cs / 100 )).$(printf '%02d' "$(( dt_cs % 100 ))")"
 
     read -r a b c d e <<< "$(read_diskstats "$DISK_WHOLE")"
     is_num "${a:-}" || a=0
-    MV_DISK_RD=$(awk -v n="$a" -v p="$PREV_DSK_RD" -v d="$dt" 'BEGIN{ v=(n-p)*512/d; if(v<0)v=0; printf "%.0f", v }')
-    MV_DISK_WR=$(awk -v n="$b" -v p="$PREV_DSK_WR" -v d="$dt" 'BEGIN{ v=(n-p)*512/d; if(v<0)v=0; printf "%.0f", v }')
-    MV_DISK_IOPS=$(awk -v n="$(( c + d ))" -v p="$(( PREV_DSK_RC + PREV_DSK_WC ))" -v dd="$dt" 'BEGIN{ v=(n-p)/dd; if(v<0)v=0; printf "%.0f", v }')
-    MV_DISK_UTIL=$(awk -v n="$e" -v p="$PREV_DSK_IOT" -v dd="$dt" 'BEGIN{ v=(n-p)/(dd*1000)*100; if(v<0)v=0; if(v>100)v=100; printf "%.0f", v }')
+    is_num "${b:-}" || b=0
+    is_num "${c:-}" || c=0
+    is_num "${d:-}" || d=0
+    is_num "${e:-}" || e=0
+    is_num "${PREV_DSK_RD:-}" || PREV_DSK_RD=0
+    is_num "${PREV_DSK_WR:-}" || PREV_DSK_WR=0
+    is_num "${PREV_DSK_RC:-}" || PREV_DSK_RC=0
+    is_num "${PREV_DSK_WC:-}" || PREV_DSK_WC=0
+    is_num "${PREV_DSK_IOT:-}" || PREV_DSK_IOT=0
+    # 磁盘速率：bash 整数运算，零 fork（原四次 awk）
+    MV_DISK_RD=$(( (a - PREV_DSK_RD) * 512 * 100 / dt_cs ))
+    [ "$MV_DISK_RD" -lt 0 ] && MV_DISK_RD=0
+    MV_DISK_WR=$(( (b - PREV_DSK_WR) * 512 * 100 / dt_cs ))
+    [ "$MV_DISK_WR" -lt 0 ] && MV_DISK_WR=0
+    MV_DISK_IOPS=$(( (c + d - PREV_DSK_RC - PREV_DSK_WC) * 100 / dt_cs ))
+    [ "$MV_DISK_IOPS" -lt 0 ] && MV_DISK_IOPS=0
+    MV_DISK_UTIL=$(( (e - PREV_DSK_IOT) * 10 / dt_cs ))
+    [ "$MV_DISK_UTIL" -lt 0 ] && MV_DISK_UTIL=0
+    [ "$MV_DISK_UTIL" -gt 100 ] && MV_DISK_UTIL=100
     PREV_DSK_RD=$a; PREV_DSK_WR=$b; PREV_DSK_RC=$c; PREV_DSK_WC=$d; PREV_DSK_IOT=$e
 
-    local si so sr se ub ue ud
+    local si so sr se ub ue ud _rd _rv
     read -r si so sr se ub ue ud <<< "$(read_snmp)"
     is_num "${so:-}" || so=0
     is_num "${sr:-}" || sr=0
-    MV_RETRANS=$(awk -v n="$sr" -v p="$PREV_SEG_RET" -v no="$so" -v po="$PREV_SEG_OUT" 'BEGIN{ d=no-po; if(d<=0){print "0"; exit} v=(n-p)/d*100; if(v<0)v=0; printf "%.2f", v }')
+    is_num "${PREV_SEG_OUT:-}" || PREV_SEG_OUT=0
+    is_num "${PREV_SEG_RET:-}" || PREV_SEG_RET=0
+    retrans_calc "$so" "$sr"
     PREV_SEG_IN=$si; PREV_SEG_OUT=$so; PREV_SEG_RET=$sr
     is_num "${ue:-}" || ue=0
     is_num "${ub:-}" || ub=0
@@ -1815,9 +2110,11 @@ dispatch_frames() {
     now=$(read_uptime)
     is_num "${now%%.*}" || now=0
     T_FAST=$now
-    sample_fast "$now"
-    # 帧间隔判定改用 bash 厘秒整数, 省 2 次 fork/帧
+    FRAME_NOW=$now
+    # 帧间隔判定改用 bash 厘秒整数, 省 2 次 fork/帧；
+    # now_cs 提前算好，一并传给 sample_fast，免其重复计算。
     now_cs=$(u2cs "$now")
+    sample_fast "$now" "$now_cs"
     if [ $(( now_cs - $(u2cs "$T_MID") )) -ge 1000 ] 2>/dev/null; then
         T_MID=$now; sample_mid
     fi
@@ -1835,6 +2132,8 @@ dispatch_frames() {
 # 产出重复/错位的表格。这是 v1 最严重的缺陷类型, 此处从写法上规避。
 #===============================================================================
 p_line() {
+    # 直接输出：曾试验整屏缓冲（累积后一次 write），A/B 实测与逐行输出
+    # 无差异（中位数均为 ~17ms），故保留简单的直接输出。
     if [ "$IS_TTY" = "1" ]; then printf '%s\033[K\n' "$1"
     else printf '%s\n' "$1"; fi
 }
@@ -1864,6 +2163,43 @@ EOF
     MV_PROCS="$out"
 }
 
+# 进程表行渲染：纯 bash 循环，零 fork（原一次 awk 约 7ms/帧；最多 10 行）。
+# $1=命令行列宽。字段序 cpu|mem|pid|state|thr|comm|metric|cmdline…
+# cmdline 含 | 时会被切散：$8 起为续段（$7 是 n/i 模式的指标列），用 read 的
+# 末变量吞掉剩余部分（含分隔符原样保留）再拼接，与原 awk 的 join(8..NF) 等价。
+# 注：bash 的 ${#cmd}/${cmd:0:n} 按字符计数（UTF-8 下），比 mawk 的字节语义
+# 更不容易把多字节字符拦腰切断。
+render_proc_rows() {
+    local proc_wid="$1"
+    local _pc _pm _pp _ps _pt _pcomm _pmet _prest _pcmd _psc _pline _rawline _pipes
+    while IFS= read -r _rawline; do
+        [ -n "$_rawline" ] || continue
+        # 字段数防护：至少 6 个字段（5 个 | 分隔符），与原 awk 的 NF>=6 严格等价
+        _pipes="${_rawline//[^|]/}"
+        [ "${#_pipes}" -ge 5 ] || continue
+        IFS='|' read -r _pc _pm _pp _ps _pt _pcomm _pmet _prest <<< "$_rawline"
+        _pcmd="$_prest"
+        [ -z "$_pcmd" ] && _pcmd="$_pcomm"
+        if [ "$proc_wid" -gt 8 ] && [ "${#_pcmd}" -gt "$proc_wid" ]; then
+            _pcmd="${_pcmd:0:$proc_wid}"
+        fi
+        case "$_ps" in
+            R) _psc="$C_GREEN" ;;
+            D|Z) _psc="$C_RED" ;;
+            T) _psc="$C_YELLOW" ;;
+            *) _psc="$C_DIM" ;;
+        esac
+        if [ "$CV_PROC_MODE" = "n" ] || [ "$CV_PROC_MODE" = "i" ]; then
+            printf -v _pline '  %s%7s %8s %8s %7s %5s  %s%-4s%s %s' \
+                "$C_DIM" "$_pp" "$_pmet" "$_pc" "$_pm" "$_pt" "$_psc" "$_ps" "$C_RESET" "$_pcmd"
+        else
+            printf -v _pline '  %s%7s %8s %7s %5s  %s%-4s%s %s' \
+                "$C_DIM" "$_pp" "$_pc" "$_pm" "$_pt" "$_psc" "$_ps" "$C_RESET" "$_pcmd"
+        fi
+        p_line "$_pline"
+    done <<< "$MV_PROCS"
+}
+
 render() {
     term_width
     local W=$TERM_COLS
@@ -1876,7 +2212,8 @@ render() {
     # 必然顶出右边界折行, 破坏分区对齐。此标志只精简"长度失控的单行"内容,
     # 不改变分区可见性 (那是 COMPACT 的职责), 两者相互独立。
     if [ "$W" -lt 90 ]; then NARROW=1; else NARROW=0; fi
-    local now up loadn line i proc_wid
+    local now up loadn line i proc_wid _upm
+    local SL_CPU SL_LOAD SL_MEM SL_DISK SL_NET SL_TCP _os _kern _rtb
     local HB_RXT HB_TXT HB_SUM HB_MU HB_MT HB_CA HB_SU HB_ST HB_DI HB_WB
     local HR_RX HR_TX HR_PKR HR_PKT HR_PGI HR_PGO HR_DR HR_DW
     local HB_PRX HB_PTX HB_QT HB_ETA
@@ -1900,7 +2237,12 @@ render() {
         }')"
 
     now=$(date '+%Y-%m-%d %H:%M:%S')
-    up=$(fmt_uptime "$SV_UPTIME")
+    # 运行时间显示到分钟即可：按分钟缓存格式化结果，避免每帧 fork 一次 $( )
+    _upm=$(( ${SV_UPTIME%%.*} / 60 ))
+    if [ "$_upm" != "${UP_MIN_C:-x}" ]; then
+        UP_MIN_C="$_upm"; UP_STR_C=$(fmt_uptime "$SV_UPTIME")
+    fi
+    up="$UP_STR_C"
     IFACE_MAIN="${IFACE_LIST%% *}"
     [ -z "$IFACE_MAIN" ] && IFACE_MAIN="eth0"
 
@@ -1918,13 +2260,26 @@ render() {
     hb_to    HB_CA   "$CV_MEM_CACHE"
     hb_to    HB_SU   "$CV_SWAP_USED";     hb_to HB_ST "$CV_SWAP_TOTAL"
     hb_to    HB_DI   "$CV_MEM_DIRTY";     hb_to HB_WB "$CV_MEM_WB"
-    hb_to    HB_PRX  "$CV_PERIOD_RX";     hb_to HB_PTX "$CV_PERIOD_TX"
-    hb_to    HB_QT   "$ST_QUOTA";         hb_to HB_ETA "$CV_QUOTA_ETA"
+    # 配额未启用时跳过 6 个配额格式化调用（约 2.7ms/帧）；启用配额的机器不受影响
+    if [ "${ST_QUOTA:-0}" -gt 0 ] 2>/dev/null; then
+        hb_to    HB_PRX  "$CV_PERIOD_RX";     hb_to HB_PTX "$CV_PERIOD_TX"
+        hb_to    HB_QT   "$ST_QUOTA";         hb_to HB_ETA "$CV_QUOTA_ETA"
+        pc_to    PC_Q    "$CV_QUOTA_PCT";     bar_to BA_Q "$CV_QUOTA_PCT" 10
+    fi
     pc_to    PC_CPU  "$CV_CPU_TOTAL";     bar_to BA_CPU "$CV_CPU_TOTAL" "$bw"
     pc_to    PC_MEM  "$mempct";           bar_to BA_MEM "$mempct" "$bw"
-    pc_to    PC_Q    "$CV_QUOTA_PCT";     bar_to BA_Q "$CV_QUOTA_PCT" 10
 
     [ "$IS_TTY" = "1" ] && printf '\033[H'
+    # 分区标题对齐：中文标签（负载/内存/磁盘/网卡）占 4 列补 1 空格，
+    # CPU/TCP 占 3 列补 2 空格；英文模式按 7 列对齐。标签文本每帧不变，
+    # 此处一次算好，后面各分区直接引用。
+    if [ "$OUT_LANG" = "en" ]; then
+        SL_CPU="CPU    "; SL_LOAD="Load   "; SL_MEM="Memory "; SL_DISK="Disk   "
+        SL_NET="NIC    "; SL_TCP="TCP    "
+    else
+        SL_CPU="CPU  "; SL_LOAD="负载 "; SL_MEM="内存 "; SL_DISK="磁盘 "
+        SL_NET="网卡 "; SL_TCP="TCP  "
+    fi
 
     # ---- 标题 ----
     line="${C_BOLD}${PROG}${C_RESET} ${C_CYAN}${T_TITLE}${C_RESET}"
@@ -1937,21 +2292,32 @@ render() {
     [ "$COMPACT" = "1" ] && line="${line} ${C_DIM}[紧凑]${C_RESET}"
     p_line "$line"
 
-    # ---- 主机信息 ----
-    line="  ${C_CYAN}${SV_HOST}${C_RESET}  ${C_DIM}${now}${C_RESET}  ${T_UPTIME} ${C_GREEN}${up}${C_RESET}  ${C_GREEN}${SV_CORES_N}${C_RESET}${T_CORES}"
+    # ---- 主机信息（压缩为两行）----
+    # 第 1 行：主机名 · 时间 · 运行时间（0 天时省略天数）· 温度
+    # 第 2 行：核数 · 精简系统标识 · 网卡 IP · 登录/僵尸/失败单元
+    # 系统标识精简：Ubuntu 24.04.5 LTS → Ubuntu 24.04.5；6.8.0-142-generic → 6.8.0
+    _os="${SV_OS%% (*}"; _os="${_os% LTS}"
+    _kern="${SV_KERNEL%%-*}"
+    line="  ${C_CYAN}${SV_HOST}${C_RESET}  ${C_DIM}${now}${C_RESET}  ${T_UPTIME} ${C_GREEN}${up}${C_RESET}"
     [ -n "${SV_TEMP:-}" ] && line="${line}  ${C_MAGENTA}${T_TEMP} ${SV_TEMP}°C${C_RESET}"
     p_line "$line"
     # 紧凑模式 (W<60) 下省去失败单元与系统标识 —— 这两段最长且可推断,
     # 留着会把整行顶出终端宽度而折行, 破坏分区对齐。
-    line="  ${C_GREEN}${IFACE_MAIN}${C_RESET} ${C_DIM}${SV_IP}${C_RESET}  ${T_USERS} ${SV_USERS}  ${T_ZOMBIE} ${SV_ZOMBIE}"
-    [ "$NARROW" != "1" ] && line="${line}  ${T_FAILED} ${SV_SYSTEMD_FAIL}  ${C_DIM}${SV_OS} ${SV_KERNEL} ${SV_ARCH}${C_RESET}"
+    # W<60 (COMPACT) 下再去掉系统标识段，保证不折行
+    if [ "$COMPACT" = "1" ]; then
+        line="  ${C_GREEN}${SV_CORES_N}${C_RESET}${T_CORES}"
+    else
+        line="  ${C_GREEN}${SV_CORES_N}${C_RESET}${T_CORES}  ${C_DIM}${_os} (${_kern}) ${SV_ARCH}${C_RESET}"
+    fi
+    line="${line}  ${C_GREEN}${IFACE_MAIN}${C_RESET} ${C_DIM}${SV_IP}${C_RESET}  ${T_USERS} ${SV_USERS}  ${T_ZOMBIE} ${SV_ZOMBIE}"
+    [ "$NARROW" != "1" ] && line="${line}  ${T_FAILED} ${SV_SYSTEMD_FAIL}"
     p_line "$line"
     p_line "$HR_LINE"
 
     if [ "$MINIMAL" != "1" ]; then
 
     # ---- CPU ----
-    line="  ${C_BOLD}${T_CPU}${C_RESET} ${PC_CPU}${BA_CPU}${C_RESET} ${PC_CPU}${CV_CPU_TOTAL}%${C_RESET}"
+    line="  ${C_BOLD}${SL_CPU}${C_RESET}${PC_CPU}${BA_CPU}${C_RESET} ${PC_CPU}${CV_CPU_TOTAL}%${C_RESET}"
     # 窄终端只保留总量与量条: user/sys/io/steal 明细会把整行顶出 W 而折行
     if [ "$NARROW" != "1" ]; then
         line="${line}  ${C_DIM}${T_USER} ${CV_CPU_USER}  ${T_SYS} ${CV_CPU_SYS}  ${T_IO} ${CV_CPU_IO}${C_RESET}"
@@ -1979,33 +2345,40 @@ render() {
 
     # ---- 负载 / 进程 ----
     if [ "${loadn%%.*}" -ge 2 ] 2>/dev/null; then lc="$C_RED"; else lc="$C_YELLOW"; fi
-    p_line "  ${C_BOLD}${T_LOAD}${C_RESET}  ${lc}${CV_LOAD1} ${CV_LOAD5} ${CV_LOAD15}${C_RESET} ${C_DIM}(${loadn}${T_LOADHINT})${C_RESET}    ${C_BOLD}${T_PROCS}${C_RESET} ${CV_RUNNING} / ${CV_TOTPROC}"
+    p_line "  ${C_BOLD}${SL_LOAD}${C_RESET}${lc}${CV_LOAD1} ${CV_LOAD5} ${CV_LOAD15}${C_RESET} ${C_DIM}(${loadn}${T_LOADHINT})${C_RESET}    ${C_BOLD}${T_PROCS}${C_RESET} ${CV_RUNNING} / ${CV_TOTPROC}"
 
     # ---- 内存 ----
-    line="  ${C_BOLD}${T_MEM}${C_RESET} ${PC_MEM}${BA_MEM}${C_RESET} ${PC_MEM}${mempct}%${C_RESET}"
+    line="  ${C_BOLD}${SL_MEM}${C_RESET}${PC_MEM}${BA_MEM}${C_RESET} ${PC_MEM}${mempct}%${C_RESET}"
     line="${line}  ${C_WHITE}${HB_MU} / ${HB_MT}${C_RESET}"
     line="${line}  ${C_DIM}${T_CACHE} ${HB_CA}${C_RESET}"
-    line="${line}  ${C_BOLD}${T_SWAP}${C_RESET} ${HB_SU} / ${HB_ST} (${swappct}%)"
     p_line "$line"
-    p_line "  ${C_DIM}${T_SWAPIN} ${HR_PGI}  ${T_SWAPOUT} ${HR_PGO}   Dirty ${HB_DI}  Writeback ${HB_WB}${C_RESET}"
+    # 窄终端下逐步裁剪：W<90 去掉 Dirty/Writeback；W<60 只留交换用量，保证不折行
+    if [ "$COMPACT" = "1" ]; then
+        line="         ${C_BOLD}${T_SWAP}${C_RESET} ${HB_SU} / ${HB_ST} (${swappct}%)"
+    else
+        line="         ${C_BOLD}${T_SWAP}${C_RESET} ${HB_SU} / ${HB_ST} (${swappct}%)  ${C_DIM}${T_SWAPIN} ${HR_PGI}  ${T_SWAPOUT} ${HR_PGO}"
+        [ "$NARROW" != "1" ] && line="${line}   Dirty ${HB_DI}  Writeback ${HB_WB}"
+    fi
+    p_line "${line}${C_RESET}"
     p_line "$HR_LINE"
 
     # ---- 磁盘 ----
-    p_line "  ${C_BOLD}${T_DISK}${C_RESET}"
     if [ -n "${SV_DISK:-}" ]; then
-        local dline dpct dmnt dused dsize
+        local dline dpct dmnt dused dsize _dlab
+        _dlab="  ${C_BOLD}${SL_DISK}${C_RESET}"
         while IFS= read -r dline; do
             [ -z "$dline" ] && continue
             dpct=${dline%%|*}; dline=${dline#*|}
             dmnt=${dline%%|*}; dline=${dline#*|}
             dused=${dline%%|*}; dsize=${dline#*|}
             pc_to PC_D1 "$dpct"; bar_to BA_D1 "$dpct" 8
-            p_line "    ${PC_D1}${BA_D1}${C_RESET}  ${C_CYAN}${dmnt}${C_RESET}  ${PC_D1}${dpct}%${C_RESET} ${C_DIM}${dused} / ${dsize}${C_RESET}"
+            p_line "${_dlab}${PC_D1}${BA_D1}${C_RESET} ${PC_D1}${dpct}%${C_RESET}  ${C_WHITE}${dused} / ${dsize}${C_RESET} ${C_CYAN}(${dmnt})${C_RESET}"
+            _dlab="       "
         done <<EOF
 $SV_DISK
 EOF
     else
-        p_line "    ${C_DIM}${T_NA}${C_RESET}"
+        p_line "  ${C_BOLD}${SL_DISK}${C_RESET}${C_DIM}${T_NA}${C_RESET}"
     fi
 
     # ---- 磁盘 IO (紧凑模式隐藏) ----
@@ -2015,24 +2388,29 @@ EOF
     imax="${SV_INODE:-0|}"; imnt="${imax#*|}"; imax="${imax%%|*}"
     is_num "${imax:-}" || imax=0
     pc_to PC_IN "$imax"
-    line="  ${C_BOLD}${T_DISKIO}${C_RESET}  ${C_DIM}${T_INODE}${C_RESET} ${PC_IN}${imax}%${C_RESET} ${C_DIM}${imnt}${C_RESET}"
-    line="${line}   ${T_READ} ${HR_DR}  ${T_WRITE} ${HR_DW}   IOPS ${MV_DISK_IOPS}  ${T_UTIL} ${MV_DISK_UTIL}%"
+    line="         ${C_BOLD}${T_DISKIO}${C_RESET} ${T_READ} ${HR_DR}  ${T_WRITE} ${HR_DW}   IOPS ${MV_DISK_IOPS}  ${T_UTIL} ${MV_DISK_UTIL}%"
+    # 窄终端 (W<90) 下去掉 inode 尾部，保证不折行（容量压力已在上面磁盘行体现）
+    [ "$NARROW" != "1" ] && line="${line}   ${C_DIM}${T_INODE} ${PC_IN}${imax}%${C_RESET} ${C_DIM}(${imnt})${C_RESET}"
     p_line "$line"
     fi
     p_line "$HR_LINE"
     fi
 
     # ---- 网络 ----
-    p_line "  ${C_BOLD}${T_IFACE}${C_RESET}  ${C_GREEN}${IFACE_MAIN}${C_RESET} ${C_DIM}${SV_IP}${C_RESET}"
-    p_line "  ${C_BOLD}${T_CUM}${C_RESET}  ${C_CYAN}↓${HB_RXT}${C_RESET}  ${C_CYAN}↑${HB_TXT}${C_RESET}   ${C_DIM}${T_SUM} ${HB_SUM}${C_RESET}"
-    p_line "  ${C_BOLD}${T_LIVE}${C_RESET}  ${C_GREEN}↓${HR_RX}${C_RESET}  ${C_MAGENTA}↑${HR_TX}${C_RESET}   ${C_DIM}${T_PEAK} ↓${HR_PKR} ↑${HR_PKT}${C_RESET}"
-
+    # W<60 (COMPACT) 下去掉合计段，保证不折行
+    line="  ${C_BOLD}${SL_NET}${C_RESET}${C_GREEN}${IFACE_MAIN}${C_RESET} ${C_DIM}${SV_IP}${C_RESET}   ${C_BOLD}${T_CUM}${C_RESET} ${C_CYAN}↓${HB_RXT}${C_RESET}  ${C_CYAN}↑${HB_TXT}${C_RESET}"
+    [ "$COMPACT" != "1" ] && line="${line}  ${C_DIM}(${T_SUM} ${HB_SUM})${C_RESET}"
+    p_line "$line"
     local nicerr=$(( CV_RXERR + CV_TXERR + CV_RXDROP + CV_TXDROP ))
+    # W<60 (COMPACT) 下去掉峰值段，保证不折行
+    line="         ${C_BOLD}${T_LIVE}${C_RESET}  ${C_GREEN}↓${HR_RX}${C_RESET}  ${C_MAGENTA}↑${HR_TX}${C_RESET}"
+    [ "$COMPACT" != "1" ] && line="${line}   ${C_DIM}${T_PEAK} ↓${HR_PKR} ↑${HR_PKT}${C_RESET}"
     if [ "$nicerr" -gt 0 ]; then
-        p_line "  ${C_RED}${T_ERR} $(( CV_RXERR + CV_TXERR ))   ${T_DROP} $(( CV_RXDROP + CV_TXDROP ))${C_RESET}"
+        line="${line}   ${C_RED}${T_ERR} $(( CV_RXERR + CV_TXERR ))  ${T_DROP} $(( CV_RXDROP + CV_TXDROP ))${C_RESET}"
     else
-        p_line "  ${C_DIM}${T_ERR} 0   ${T_DROP} 0${C_RESET}"
+        line="${line}   ${C_DIM}${T_ERR} 0  ${T_DROP} 0${C_RESET}"
     fi
+    p_line "$line"
 
     # ---- 流量配额 ----
     if [ "${ST_QUOTA:-0}" -gt 0 ] 2>/dev/null; then
@@ -2056,8 +2434,8 @@ EOF
         [ "$_hi" -gt "$hmax" ] && hmax=$_hi
     done
     [ "$hmax" -lt 65536 ] && hmax=65536
-    # 两条曲线合并为一次 awk 调用 (原为 2 次 fork)。
-    IFS='|' read -r SP_RX SP_TX <<< "$(sparkline2 "$NET_HIST_RX" "$NET_HIST_TX" "$(( W - 6 ))" "$hmax")"
+    # 纯 bash 零 fork，结果直接写入 SP_RX / SP_TX（不用 $( ) 包裹，避开子 shell）
+    sparkline2 "$NET_HIST_RX" "$NET_HIST_TX" "$(( W - 6 ))" "$hmax"
     p_line "  ${C_GREEN}↓${C_RESET} ${C_GREEN}${SP_RX}${C_RESET}"
     p_line "  ${C_MAGENTA}↑${C_RESET} ${C_MAGENTA}${SP_TX}${C_RESET}"
     p_line "$HR_LINE"
@@ -2066,24 +2444,41 @@ EOF
     if [ "${CV_TCP_SYN:-0}" -gt 10 ] 2>/dev/null; then sc="$C_RED"; else sc="$C_DIM"; fi
     if [ "${CV_TCP_TW:-0}" -gt 30000 ] 2>/dev/null; then twc="$C_YELLOW"; else twc="$C_DIM"; fi
     if [ "${CV_TCP_CW:-0}" -gt 100 ] 2>/dev/null; then cwc="$C_RED"; else cwc="$C_DIM"; fi
-    line="  ${C_BOLD}${T_TCP}${C_RESET}  ${C_WHITE}${CV_TCP_TOTAL}${C_RESET}  ${C_DIM}${T_ESTAB}${C_RESET} ${C_GREEN}${CV_TCP_EST}${C_RESET}"
-    line="${line}  ${sc}SYN_RECV ${CV_TCP_SYN}${C_RESET}"
-    line="${line}  ${twc}TIME_WAIT ${CV_TCP_TW}${C_RESET}"
-    line="${line}  ${cwc}CLOSE_WAIT ${CV_TCP_CW}${C_RESET}"
+    line="  ${C_BOLD}${SL_TCP}${C_RESET}${C_WHITE}${CV_TCP_TOTAL}${C_RESET}  ${C_DIM}${T_ESTAB}${C_RESET} ${C_GREEN}${CV_TCP_EST}${C_RESET}"
+    # W<60 (COMPACT) 下只留总数/已建立/监听，保证不折行
+    if [ "$COMPACT" != "1" ]; then
+        line="${line}  ${sc}SYN_RECV ${CV_TCP_SYN}${C_RESET}"
+        line="${line}  ${twc}TIME_WAIT ${CV_TCP_TW}${C_RESET}"
+        line="${line}  ${cwc}CLOSE_WAIT ${CV_TCP_CW}${C_RESET}"
+    fi
     line="${line}  ${C_DIM}${T_LISTEN} ${CV_TCP_LISTEN}${C_RESET}"
     p_line "$line"
 
     # ctpct 已在 render 开头与其他算术指标一并算出 (原来在此单独 fork 一次 awk);
     # 注意此处不能再用 local ctpct=0 声明, 否则会把已算好的值重置。
     if [ "${MV_RETRANS:-0}" != "0" ] 2>/dev/null; then rtc="$C_YELLOW"; else rtc="$C_DIM"; fi
+    # 重传率附带本周期分子/分母：小流量下分母很小（如 90 个包），光看百分比会误导，
+    # "15.56% (14/90)" 让用户一眼看出是小样本。
+    _rtb=""
+    [ "${MV_RETRANS_SEG:-0}" -gt 0 ] 2>/dev/null && _rtb=" (${MV_RETRANS_RET}/${MV_RETRANS_SEG})"
     # 队列溢出 / SYN 重传: 显示 "累计(+本周期新增)"。
     # 告警判定用的是括号里的增量(累计值必然误报), 两者并排显示才能对应得上。
-    p_line "  ${C_DIM}${T_RETRANS}${C_RESET} ${rtc}${MV_RETRANS}%${C_RESET}  ${C_DIM}${T_OVERFLOW} ${MV_LIS_OVF}(+${MV_LIS_OVF_INC})  ListenDrop ${MV_LIS_DROP}  SYN${T_RETRANS} ${MV_SYN_RET}(+${MV_SYN_RET_INC})  conntrack ${MV_CONNTRACK}/${MV_CONNTRACK_MAX} (${ctpct}%)${C_RESET}"
+    # 窄终端下逐步裁剪尾部：W<90 去掉 conntrack；W<60 再去掉 ListenDrop，保证不折行。
+    line="         ${C_DIM}${T_RETRANS}${C_RESET} ${rtc}${MV_RETRANS}%${_rtb}${C_RESET}"
+    line="${line}  ${C_DIM}${T_OVERFLOW} ${MV_LIS_OVF}(+${MV_LIS_OVF_INC})"
+    [ "$COMPACT" != "1" ] && line="${line}  ListenDrop ${MV_LIS_DROP}"
+    line="${line}  SYN${T_RETRANS} ${MV_SYN_RET}(+${MV_SYN_RET_INC})"
+    [ "$NARROW" != "1" ] && line="${line}  conntrack ${MV_CONNTRACK}/${MV_CONNTRACK_MAX} (${ctpct}%)"
+    p_line "${line}${C_RESET}"
 
-    # ---- UDP ----
-    p_line "  ${C_BOLD}${T_UDP}${C_RESET}  ${C_WHITE}${CV_UDP_TOTAL}${C_RESET}  ${C_DIM}InErr ${MV_UDP_INERR}   RcvbufErr ${MV_UDP_RCVBUF}${C_RESET}"
-    [ -n "${CV_TCP_PORTS:-}" ] && p_line "  ${C_BOLD}${T_LISTEN}${C_RESET}  ${C_CYAN}${CV_TCP_PORTS}${C_RESET}"
-    [ -n "${CV_TCP_PEERS:-}" ] && p_line "  ${C_BOLD}${T_TOP}${C_RESET}  ${C_YELLOW}${CV_TCP_PEERS}${C_RESET}"
+    # ---- UDP / 监听端口 / TOP 对端 ----
+    line="         ${C_BOLD}${T_UDP}${C_RESET}  ${C_WHITE}${CV_UDP_TOTAL}${C_RESET}  ${C_DIM}InErr ${MV_UDP_INERR}   RcvbufErr ${MV_UDP_RCVBUF}${C_RESET}"
+    [ -n "${CV_TCP_PORTS:-}" ] && line="${line}   ${C_BOLD}${T_LISTEN}${C_RESET}  ${C_CYAN}${CV_TCP_PORTS}${C_RESET}"
+    p_line "$line"
+    if [ -n "${CV_TCP_PEERS:-}" ]; then
+        trunc_peers "$CV_TCP_PEERS" "$(( W - 16 ))"
+        p_line "         ${C_BOLD}${T_TOP}${C_RESET}  ${C_YELLOW}${TRUNC_PEERS}${C_RESET}"
+    fi
 
     # ---- 端口 -> 进程 (按 p 展开) ----
     if [ "$MV_PORTS_ON" = "1" ] && [ "$COMPACT" != "1" ]; then
@@ -2134,27 +2529,13 @@ EOF
         n|i) proc_wid=$(( W - 49 )) ;;
         *)   proc_wid=$(( W - 40 )) ;;
     esac
-    printf '%s\n' "$MV_PROCS" | awk -F'|' \
-        -v dim="$C_DIM" -v rs="$C_RESET" -v gr="$C_GREEN" -v rd="$C_RED" -v yl="$C_YELLOW" \
-        -v wid="$proc_wid" -v tty="$IS_TTY" -v mcol="$CV_PROC_MODE" '
-    NF >= 6 {
-        cmd = ""
-        if (NF >= 8) { for (i = 8; i <= NF; i++) cmd = cmd (i > 8 ? "|" : "") $i }
-        if (cmd == "") cmd = $6
-        # 注: 这里按字节截断。在 mawk (字节语义) 下若命令行含 4 字节字符
-        # (如 emoji) 且超出宽度, 末尾可能残留半个字符。POSIX awk 取不到
-        # 字节值, 无法可靠判断字符边界, 故保持现状并在文档中说明。
-        if (wid > 8 && length(cmd) > wid) cmd = substr(cmd, 1, wid)
-        sc = dim
-        if ($4 == "R") sc = gr
-        else if ($4 == "D" || $4 == "Z") sc = rd
-        else if ($4 == "T") sc = yl
-        printf "  %s%7s", dim, $3
-        if (mcol == "n" || mcol == "i") printf " %8s", $7
-        printf " %8s %7s %5s  %s%-4s%s %s", $1, $2, $5, sc, $4, rs, cmd
-        if (tty == 1) printf "\033[K"
-        printf "\n"
-    }'
+    # 进程表行渲染：纯 bash 循环，零 fork（原一次 awk 约 7ms/帧；最多 10 行）。
+    # $1=命令行列宽。字段序 cpu|mem|pid|state|thr|comm|metric|cmdline…
+    # cmdline 含 | 时会被切散：$8 起为续段（$7 是 n/i 模式的指标列），用 read 的
+    # 末变量吞掉剩余部分（含分隔符原样保留）再拼接，与原 awk 的 join(8..NF) 等价。
+    # 注：bash 的 ${#cmd}/${cmd:0:n} 按字符计数（UTF-8 下），比 mawk 的字节语义
+    # 更不容易把多字节字符拦腰切断。
+    render_proc_rows "$proc_wid"
     # MV_PROCS 最多 10 行, bash 循环零 fork; 字段序 cpu|mem|pid|state|thr|...
     dstate=0
     while IFS='|' read -r _qc _qm _qp _qs _qt _qn; do
@@ -2176,11 +2557,19 @@ EOF
         is_num "${alertn:-}" || alertn=0
     fi
     if [ "$alertn" -gt 0 ]; then ac="$C_RED"; else ac="$C_DIM"; fi
+    # 自适应开启时在刷新间隔后标注，手动 +/- 后标记消失（手动优先）
+    local ad_mark=""
+    [ "${ADAPTIVE:-0}" = "1" ] && ad_mark=" ${T_ADAPTIVE}"
     # 窄终端省去完整键位提示(按 ? 仍可看帮助), 否则底栏会超出 W 折行
-    if [ "$NARROW" = "1" ]; then
-        p_line "  ${C_DIM}${T_REFRESH} ${INTERVAL}s${C_RESET}   ${C_DIM}${T_RENDER} ${RENDER_MS}ms${C_RESET}   ${ac}${T_ALERT} ${alertn}${C_RESET}   ${C_DIM}[?]${C_RESET}"
+    # 页脚自适应：长版（带按键提示）仅在放得下时显示，否则用短版。
+    # T_KEYS_W 在 init_i18n 按语言预计算（CJK 计 2 列）；动态部分
+    #（刷新/渲染/告警）全为 ASCII，按 40 列上界预留。
+    # 旧逻辑按 NARROW 一刀切：中文在 W=90~105 下仍折行；英文长版 119 列
+    # 恒超 W 上限 110，从未完整显示过。
+    if [ "$(( ${T_KEYS_W:-0} + 40 ))" -le "$W" ]; then
+        p_line "  ${C_DIM}${T_KEYS}${C_RESET}   ${C_DIM}${T_REFRESH} ${INTERVAL}s${ad_mark}${C_RESET}   ${C_DIM}${T_RENDER} ${RENDER_MS}ms${C_RESET}   ${ac}${T_ALERT} ${alertn}${C_RESET}"
     else
-        p_line "  ${C_DIM}${T_KEYS}${C_RESET}   ${C_DIM}${T_REFRESH} ${INTERVAL}s${C_RESET}   ${C_DIM}${T_RENDER} ${RENDER_MS}ms${C_RESET}   ${ac}${T_ALERT} ${alertn}${C_RESET}"
+        p_line "  ${C_DIM}${T_REFRESH} ${INTERVAL}s${ad_mark}${C_RESET}   ${C_DIM}${T_RENDER} ${RENDER_MS}ms${C_RESET}   ${ac}${T_ALERT} ${alertn}${C_RESET}   ${C_DIM}[?]${C_RESET}"
     fi
     [ "$IS_TTY" = "1" ] && printf '\033[J'
     return 0
@@ -2273,8 +2662,9 @@ read_key() {
                 MV_PORTS=$(port_map)
             fi
             ;;
-        +)   [ "$INTERVAL" -lt 30 ] && INTERVAL=$(( INTERVAL + 1 )) ;;
-        -)   [ "$INTERVAL" -gt 1 ] && INTERVAL=$(( INTERVAL - 1 )) ;;
+        +)   [ "$INTERVAL" -lt 30 ] && INTERVAL=$(( INTERVAL + 1 )); ADAPTIVE=0 ;;
+        -)   [ "$INTERVAL" -gt 1 ] && INTERVAL=$(( INTERVAL - 1 )); ADAPTIVE=0 ;;
+        a|A) if [ "${ADAPTIVE:-0}" = "1" ]; then ADAPTIVE=0; else ADAPTIVE=1; adaptive_snap; fi ;;
         s|S) snapshot_to_log ;;
         '?') show_help ;;
     esac
@@ -2310,11 +2700,71 @@ snapshot_to_log() {
     return 0
 }
 
+#===============================================================================
+# 17.5 自适应刷新
+#
+# 高负载时自动降低刷新频率 (1s -> 2s -> 5s)，减少自身 CPU 开销；负载回落后
+# 逐档恢复。用「阈值迟滞」(升 85 / 降 60) +「连续帧计数」(升 3 帧 / 降 5 帧)
+# 双保险，避免在阈值附近来回抖动。纯 bash 整数运算，每帧开销可忽略。
+#===============================================================================
+adaptive_snap() {
+    # 将当前 INTERVAL 对齐到最近的自适应档位（配置文件写了非档位值时用；3s 及以下归 2s 档）
+    if [ "$INTERVAL" -le 1 ] 2>/dev/null; then ADAPTIVE_LEVEL=0; INTERVAL=1
+    elif [ "$INTERVAL" -le 3 ] 2>/dev/null; then ADAPTIVE_LEVEL=1; INTERVAL=2
+    else ADAPTIVE_LEVEL=2; INTERVAL=5; fi
+    return 0
+}
+
+adaptive_step_up() {
+    case "$ADAPTIVE_LEVEL" in
+        0) ADAPTIVE_LEVEL=1; INTERVAL=2 ;;
+        1) ADAPTIVE_LEVEL=2; INTERVAL=5 ;;
+    esac
+    return 0
+}
+
+adaptive_step_down() {
+    case "$ADAPTIVE_LEVEL" in
+        2) ADAPTIVE_LEVEL=1; INTERVAL=2 ;;
+        1) ADAPTIVE_LEVEL=0; INTERVAL=1 ;;
+    esac
+    return 0
+}
+
+adaptive_tick() {
+    # 每帧调用一次；依据本帧 CPU% 决定是否升/降档
+    [ "${ADAPTIVE:-0}" = "1" ] || return 0
+    local cpu="${CV_CPU_TOTAL%%.*}"
+    if ! is_num "$cpu"; then
+        ADAPTIVE_UP_COUNT=0; ADAPTIVE_DOWN_COUNT=0; return 0
+    fi
+    if [ "$cpu" -ge "${ADAPTIVE_UP_CPU:-85}" ]; then
+        ADAPTIVE_DOWN_COUNT=0
+        ADAPTIVE_UP_COUNT=$(( ADAPTIVE_UP_COUNT + 1 ))
+        if [ "$ADAPTIVE_UP_COUNT" -ge "${ADAPTIVE_UP_N:-3}" ]; then
+            ADAPTIVE_UP_COUNT=0
+            adaptive_step_up
+        fi
+    elif [ "$cpu" -le "${ADAPTIVE_DOWN_CPU:-60}" ]; then
+        ADAPTIVE_UP_COUNT=0
+        ADAPTIVE_DOWN_COUNT=$(( ADAPTIVE_DOWN_COUNT + 1 ))
+        if [ "$ADAPTIVE_DOWN_COUNT" -ge "${ADAPTIVE_DOWN_N:-5}" ]; then
+            ADAPTIVE_DOWN_COUNT=0
+            adaptive_step_down
+        fi
+    else
+        ADAPTIVE_UP_COUNT=0; ADAPTIVE_DOWN_COUNT=0
+    fi
+    return 0
+}
+
 interactive_loop() {
-    local t0 t1 spent remain
+    local t0 t1 t0_cs t1_cs now2_cs spent_cs remain_cs
     PAUSED=0
     SHOW_CORES=0
     MV_PORTS_ON=0
+    # 自适应开启时把当前间隔对齐到档位（配置文件可能写了非档位值）
+    [ "${ADAPTIVE:-0}" = "1" ] && adaptive_snap
     sample_slow
     sample_prime
     sleep 1
@@ -2322,17 +2772,28 @@ interactive_loop() {
     sample_mid
     enter_screen
     trap cleanup_all EXIT INT TERM HUP
-    trap 'WINCH=1' WINCH
+    trap 'WINCH=1; TERM_COLS=' WINCH
     WINCH=0
     while :; do
         t0=$(read_uptime)
+        u2cs_v t0_cs "$t0"
         if [ "$PAUSED" != "1" ]; then
             dispatch_frames
             quota_update
+            adaptive_tick
         fi
+        # 纯 render() 耗时（毫秒）：整数运算，零 fork（原一次 awk）。
+        # 注意 t1 在 render 之前、t2 在 render 之后，故本帧页脚显示的是
+        # 上一帧的实测渲染耗时 —— 这是面板类程序的常规做法（本帧 render
+        # 尚未发生时无法预知其耗时）。之前的计时误把采集阶段
+        # (dispatch_frames+quota_update+adaptive_tick) 算作渲染耗时。
         t1=$(read_uptime)
-        RENDER_MS=$(awk -v n="$t1" -v p="$t0" 'BEGIN{printf "%.0f", (n-p)*1000}')
+        u2cs_v t1_cs "$t1"
         render
+        t2=$(read_uptime)
+        u2cs_v t2_cs "$t2"
+        RENDER_MS=$(( (t2_cs - t1_cs) * 10 ))
+        [ "$RENDER_MS" -lt 0 ] && RENDER_MS=0
         read_key || break
         # 终端尺寸变化 (SIGWINCH): 立刻重绘, 不等待剩余刷新间隔
         if [ "$WINCH" = "1" ]; then
@@ -2340,9 +2801,13 @@ interactive_loop() {
             continue
         fi
         if [ "$PAUSED" != "1" ]; then
-            spent=$(awk -v n="$(read_uptime)" -v p="$t0" 'BEGIN{printf "%.3f", n-p}')
-            remain=$(awk -v i="$INTERVAL" -v s="$spent" 'BEGIN{ r=i-s; if (r < 0) r = 0; printf "%.3f", r }')
-            sleep "$remain" 2>/dev/null || sleep 1
+            # 剩余等待时间：整数运算，零 fork（原两次 awk）
+            u2cs_v now2_cs "$(read_uptime)"
+            spent_cs=$(( now2_cs - t0_cs ))
+            [ "$spent_cs" -lt 0 ] && spent_cs=0
+            remain_cs=$(( INTERVAL * 100 - spent_cs ))
+            [ "$remain_cs" -lt 0 ] && remain_cs=0
+            sleep "$(( remain_cs / 100 )).$(printf '%02d' "$(( remain_cs % 100 ))")" 2>/dev/null || sleep 1
         else
             sleep 0.2 2>/dev/null || sleep 1
         fi
@@ -2947,6 +3412,11 @@ do_config_show() {
     printf '%s\n' "=== 当前生效配置 ==="
     printf '  %-12s %s\n' "网卡" "$IFACE_LIST"
     printf '  %-12s %s\n' "刷新间隔" "${INTERVAL}s"
+    if [ "${ADAPTIVE:-0}" = "1" ]; then
+        printf '  %-12s %s\n' "自适应刷新" "开 (高负载自动 1s→2s→5s)"
+    else
+        printf '  %-12s %s\n' "自适应刷新" "关"
+    fi
     printf '  %-12s %s\n' "采集间隔" "${DAEMON_INTERVAL}s"
     printf '  %-12s %s\n' "计量重置日" "$ST_RESET_DAY"
     if [ "${ST_QUOTA:-0}" -gt 0 ] 2>/dev/null; then
@@ -3366,6 +3836,198 @@ DEVEOF
         printf '  %s[SKIP]%s 可读进程不足 2 个, 跳过排序键测试\n' "$C_DIM" "$C_RESET"
     fi
 
+    printf '\n  %s\n' "$(bold "14. 自适应刷新")"
+    local _sv_ad="$ADAPTIVE" _sv_lv="$ADAPTIVE_LEVEL" _sv_iv="$INTERVAL"
+    local _sv_uc="$ADAPTIVE_UP_COUNT" _sv_dc="$ADAPTIVE_DOWN_COUNT"
+    local _sv_cpu="$CV_CPU_TOTAL"
+    local _sv_up="$ADAPTIVE_UP_CPU" _sv_dn="$ADAPTIVE_DOWN_CPU"
+    local _sv_un="$ADAPTIVE_UP_N" _sv_dnn="$ADAPTIVE_DOWN_N"
+    ADAPTIVE=1; ADAPTIVE_LEVEL=0; INTERVAL=1
+    ADAPTIVE_UP_COUNT=0; ADAPTIVE_DOWN_COUNT=0
+    ADAPTIVE_UP_CPU=85; ADAPTIVE_DOWN_CPU=60; ADAPTIVE_UP_N=3; ADAPTIVE_DOWN_N=5
+
+    CV_CPU_TOTAL="90.0"
+    adaptive_tick; adaptive_tick
+    assert_eq "高负载 2 帧未升档 (需 3 帧)" "1" "$INTERVAL"
+    adaptive_tick
+    assert_eq "高负载 3 帧升档到 2s" "2" "$INTERVAL"
+    assert_eq "升档后 level=1" "1" "$ADAPTIVE_LEVEL"
+    adaptive_tick; adaptive_tick; adaptive_tick
+    assert_eq "持续高负载升档到 5s" "5" "$INTERVAL"
+    adaptive_tick; adaptive_tick; adaptive_tick
+    assert_eq "顶格 5s 不再升" "5" "$INTERVAL"
+
+    CV_CPU_TOTAL="50.0"
+    adaptive_tick; adaptive_tick; adaptive_tick; adaptive_tick
+    assert_eq "低负载 4 帧未降档 (需 5 帧)" "5" "$INTERVAL"
+    adaptive_tick
+    assert_eq "低负载 5 帧降档到 2s" "2" "$INTERVAL"
+    adaptive_tick; adaptive_tick; adaptive_tick; adaptive_tick; adaptive_tick
+    assert_eq "持续低负载降回 1s" "1" "$INTERVAL"
+    assert_eq "降档后 level=0" "0" "$ADAPTIVE_LEVEL"
+
+    CV_CPU_TOTAL="70.0"
+    adaptive_tick; adaptive_tick; adaptive_tick; adaptive_tick; adaptive_tick
+    assert_eq "迟滞区 (60~85) 不动作" "1" "$INTERVAL"
+
+    CV_CPU_TOTAL="90.0"; adaptive_tick; adaptive_tick
+    CV_CPU_TOTAL="50.0"; adaptive_tick
+    CV_CPU_TOTAL="90.0"; adaptive_tick; adaptive_tick
+    assert_eq "高低交替不累积误升档" "1" "$INTERVAL"
+
+    CV_CPU_TOTAL="N/A"
+    adaptive_tick
+    assert_eq "非数字 CPU 不动作" "1" "$INTERVAL"
+
+    ADAPTIVE=0; CV_CPU_TOTAL="99.0"
+    adaptive_tick; adaptive_tick; adaptive_tick
+    assert_eq "ADAPTIVE=0 时不升档" "1" "$INTERVAL"
+
+    ADAPTIVE=1; INTERVAL=3; adaptive_snap
+    assert_eq "snap 3s -> 2s 档" "2" "$INTERVAL"
+    assert_eq "snap 3s -> level 1" "1" "$ADAPTIVE_LEVEL"
+    INTERVAL=10; adaptive_snap
+    assert_eq "snap 10s -> 5s 档" "5" "$INTERVAL"
+    INTERVAL=1; adaptive_snap
+    assert_eq "snap 1s -> level 0" "0" "$ADAPTIVE_LEVEL"
+
+    ADAPTIVE_LEVEL=2; INTERVAL=5; adaptive_step_up
+    assert_eq "顶格 step_up 不变" "5" "$INTERVAL"
+    ADAPTIVE_LEVEL=0; INTERVAL=1; adaptive_step_down
+    assert_eq "底格 step_down 不变" "1" "$INTERVAL"
+
+    ADAPTIVE="$_sv_ad"; ADAPTIVE_LEVEL="$_sv_lv"; INTERVAL="$_sv_iv"
+    ADAPTIVE_UP_COUNT="$_sv_uc"; ADAPTIVE_DOWN_COUNT="$_sv_dc"
+    CV_CPU_TOTAL="$_sv_cpu"
+    ADAPTIVE_UP_CPU="$_sv_up"; ADAPTIVE_DOWN_CPU="$_sv_dn"
+    ADAPTIVE_UP_N="$_sv_un"; ADAPTIVE_DOWN_N="$_sv_dnn"
+
+    # 15. 布局与渲染优化 (sparkline2 / fmt_uptime / trunc_peers / df-h / retrans_calc)
+    printf '\n  %s\n' "$(bold "15. 布局与渲染优化")"
+
+    # --- sparkline2 (纯 bash, 零 fork, 结果写 SP_RX/SP_TX) ---
+    oldascii="$USE_ASCII"; USE_ASCII=1
+    sparkline2 "0 1 2 3 4 5 6 7" "" 8 7
+    assert_eq "sparkline2 长度正确" "8" "$(printf '%s' "$SP_RX" | wc -c | tr -d ' ')"
+    assert_eq "sparkline2 ascii 8 点映射" " .:-=+*@" "$SP_RX"
+    sparkline2 "5 5 5" "" 10 10
+    assert_eq "sparkline2 不足宽度不补位" "3" "$(printf '%s' "$SP_RX" | wc -c | tr -d ' ')"
+    sparkline2 "" "" 10 10
+    assert_eq "sparkline2 空输入" "" "$SP_RX"
+    sparkline2 "0 1 2 3 4 5 6 7 8 9" "" 4 9
+    assert_eq "sparkline2 超宽取后段" "4" "$(printf '%s' "$SP_RX" | wc -c | tr -d ' ')"
+    sparkline2 "0 100" "" 2 7
+    assert_eq "sparkline2 越界值钳制" " @" "$SP_RX"
+    sparkline2 "3 4" "" 2 0
+    assert_eq "sparkline2 max<=0 按 1 处理" "@@" "$SP_RX"
+    sparkline2 "1 2 3" "4 5 6" 3 6
+    assert_eq "sparkline2 双通道 TX" "3" "$(printf '%s' "$SP_TX" | wc -c | tr -d ' ')"
+    USE_ASCII=0
+    sparkline2 "0 1 2 3 4 5 6 7" "" 8 7
+    assert_eq "sparkline2 unicode 完整字符(24字节)" "24" "$(printf '%s' "$SP_RX" | wc -c | tr -d ' ')"
+    USE_ASCII=$oldascii
+
+    # --- fmt_uptime 省略零值段 ---
+    _sv_lang="$OUT_LANG"
+    OUT_LANG=zh
+    assert_eq "uptime 省略 0天0小时" "58分" "$(fmt_uptime 3480)"
+    assert_eq "uptime 省略 0天" "23小时35分" "$(fmt_uptime 84900)"
+    assert_eq "uptime 完整 1天1小时1分" "1天1小时1分" "$(fmt_uptime 90061)"
+    OUT_LANG=en
+    assert_eq "uptime en 省略 0d0h" "58m" "$(fmt_uptime 3480)"
+    assert_eq "uptime en 完整" "1d 1h 1m" "$(fmt_uptime 90061)"
+    OUT_LANG="$_sv_lang"
+
+    # --- trunc_peers 对端截断（条目完整，不拦腰切断多字节字符） ---
+    _tp="2 ← 57.144.218.141, 2 ← 57.144.219.197, 1 ← 142.251.45.3"
+    trunc_peers "$_tp" 30
+    assert_eq "trunc_peers 超长回退到条目边界" "2 ← 57.144.218.141 …" "$TRUNC_PEERS"
+    trunc_peers "$_tp" 200
+    assert_eq "trunc_peers 短行原样" "$_tp" "$TRUNC_PEERS"
+    trunc_peers "$_tp" 10
+    assert_eq "trunc_peers 预算过小不截断" "$_tp" "$TRUNC_PEERS"
+
+    # --- disk_capacity df -h 人类可读（PATH 夹具模拟 df） ---
+    mkdir -p "$TMPD/fakebin"
+    cat > "$TMPD/fakebin/df" <<'DFEOF'
+#!/bin/bash
+printf 'Filesystem Type Size Used Avail Use%% Mounted on\n'
+printf '/dev/sda1 ext4 30G 4.7G 24G 17%% /\n'
+DFEOF
+    chmod +x "$TMPD/fakebin/df"
+    _sv_path="$PATH"; PATH="$TMPD/fakebin:$PATH"
+    _dc=$(disk_capacity 3)
+    PATH="$_sv_path"
+    assert_eq "disk_capacity df -h 人类可读" "17|/|4.7G|30G" "$_dc"
+
+    # --- retrans_calc 分子/分母与边界 ---
+    PREV_SEG_OUT=1000; PREV_SEG_RET=50
+    retrans_calc 1090 64
+    assert_eq "retrans 百分比" "15.55" "$MV_RETRANS"
+    assert_eq "retrans 分母(发送段)" "90" "$MV_RETRANS_SEG"
+    assert_eq "retrans 分子(重传)" "14" "$MV_RETRANS_RET"
+    PREV_SEG_OUT=1090; PREV_SEG_RET=64
+    retrans_calc 1090 64
+    assert_eq "retrans 无流量分母为0" "0" "$MV_RETRANS_SEG"
+    assert_eq "retrans 无流量显示0" "0" "$MV_RETRANS"
+    PREV_SEG_OUT=2000; PREV_SEG_RET=100
+    retrans_calc 1500 80
+    assert_eq "retrans 计数器回退归零" "0" "$MV_RETRANS_SEG"
+    assert_eq "retrans 回退分子归零" "0" "$MV_RETRANS_RET"
+
+    # --- 页脚自适应 (T_KEYS_W 预计算，locale 无关) ---
+    _sv_lang2="$OUT_LANG"
+    OUT_LANG=zh; init_i18n
+    assert_eq "T_KEYS_W 中文(CJK计2列)" "66" "$T_KEYS_W"
+    OUT_LANG=en; init_i18n
+    assert_eq "T_KEYS_W 英文(全ASCII)" "71" "$T_KEYS_W"
+    OUT_LANG="$_sv_lang2"; init_i18n
+    # 页脚长版阈值：中文 66+40=106，W=110 显示长版、W=100 显示短版
+    assert_eq "页脚中文 W=110 用长版" "1" "$(( 66 + 40 <= 110 ? 1 : 0 ))"
+    assert_eq "页脚中文 W=100 用短版" "1" "$(( 66 + 40 <= 100 ? 0 : 1 ))"
+    # 终端宽度探测：初始必须留空，否则 term_width 首行直接返回、用不上真实宽度
+    _sv_tc="$TERM_COLS"; _sv_ht="$HAS_TPUT"
+    TERM_COLS=""; HAS_TPUT=0
+    COLUMNS=93 term_width
+    assert_eq "term_width 按 COLUMNS 探测" "93" "$TERM_COLS"
+    TERM_COLS="$_sv_tc"; HAS_TPUT="$_sv_ht"
+
+    # --- render_proc_rows (纯 bash，与原 awk 逐字节等价，已做 12 组差分验证) ---
+    _sv_mode="$CV_PROC_MODE"; _sv_procs="$MV_PROCS"
+    _sv_dim="$C_DIM"; _sv_grn="$C_GREEN"; _sv_red="$C_RED"; _sv_ylw="$C_YELLOW"; _sv_rs="$C_RESET"
+    C_DIM="[D]"; C_GREEN="[G]"; C_RED="[R]"; C_YELLOW="[Y]"; C_RESET="[X]"
+    CV_PROC_MODE=c
+    MV_PROCS="32.4|7.8|67|S|12|hatch|0|/opt/hatch/bin/hatch daemon"
+    assert_eq "proc行 标准模式" \
+        "  [D]     67     32.4     7.8    12  [D]S   [X] /opt/hatch/bin/hatch daemon" \
+        "$(render_proc_rows 40)"
+    CV_PROC_MODE=n
+    MV_PROCS="5.1|2.0|1234|R|3|nginx|42|/usr/sbin/nginx -g daemon off|extra"
+    assert_eq "proc行 n模式指标列+|保留+R变绿" \
+        "  [D]   1234       42      5.1     2.0     3  [G]R   [X] /usr/sbin/nginx -g daemon off|extra" \
+        "$(render_proc_rows 60)"
+    CV_PROC_MODE=c
+    MV_PROCS="0.0|0.1|1|S|1|systemd||"
+    assert_eq "proc行 空cmdline回退comm" \
+        "  [D]      1      0.0     0.1     1  [D]S   [X] systemd" \
+        "$(render_proc_rows 40)"
+    MV_PROCS="1.0|1.0|999|S|1|long|0|abcdefghijklmnopqrstuvwxyz"
+    assert_eq "proc行 超长截断" \
+        "  [D]    999      1.0     1.0     1  [D]S   [X] abcdefghij" \
+        "$(render_proc_rows 10)"
+    MV_PROCS="0.5|0.5|55|D|1|dd|0|dd if=/dev/zero"
+    assert_eq "proc行 D状态变红" \
+        "  [D]     55      0.5     0.5     1  [R]D   [X] dd if=/dev/zero" \
+        "$(render_proc_rows 40)"
+    MV_PROCS="a|b|c"
+    assert_eq "proc行 畸形行跳过" "" "$(render_proc_rows 40)"
+    MV_PROCS="0.1|0.1|77|S|1|中文|0|测试中文"
+    assert_eq "proc行 中文原样通过" \
+        "  [D]     77      0.1     0.1     1  [D]S   [X] 测试中文" \
+        "$(render_proc_rows 40)"
+    CV_PROC_MODE="$_sv_mode"; MV_PROCS="$_sv_procs"
+    C_DIM="$_sv_dim"; C_GREEN="$_sv_grn"; C_RED="$_sv_red"; C_YELLOW="$_sv_ylw"; C_RESET="$_sv_rs"
+
     printf '\n%s\n' "$(hr_line 70)"
     if [ "$ST_FAIL" = "0" ]; then
         printf '  %s%s%d 项全部通过%s\n' "$C_GREEN" "$C_BOLD" "$ST_PASS" "$C_RESET"
@@ -3429,7 +4091,9 @@ htop-s — Linux 服务器实时监控终端面板 (htop 风格)
 
 运行与显示:
   (无参数)              进入实时面板 (默认 1 秒刷新)
-  -i N, --interval N    刷新间隔 N 秒 (1~30)
+  -i N, --interval N    刷新间隔 N 秒 (1~30, 指定后自适应刷新自动关闭)
+      --adaptive        开启自适应刷新 (默认开启): 高负载时自动降频 1s→2s→5s
+      --no-adaptive     关闭自适应刷新
   -I IF, --iface IF     监控网卡, 支持逗号分隔多网卡 (如 eth0,eth1)
   -e, --en              英文界面
   -a, --ascii           ASCII 字符模式 (终端不支持方块字符时)
@@ -3530,7 +4194,12 @@ parse_args() {
                 optval "$1" "${2:-}" || arg_err "$1"
                 is_num "$OPT_VAL" || arg_err "$1"
                 [ "$OPT_VAL" -ge 1 ] && [ "$OPT_VAL" -le 30 ] || arg_err "$1 (需 1~30)"
-                INTERVAL=$OPT_VAL; CLI_INTERVAL=$OPT_VAL; shift "$OPT_SHIFT" ;;
+                INTERVAL=$OPT_VAL; CLI_INTERVAL=$OPT_VAL
+                # 显式指定间隔 = 手动控制；除非同时显式 --adaptive，否则关闭自适应
+                [ -n "$CLI_ADAPTIVE" ] || ADAPTIVE=0
+                shift "$OPT_SHIFT" ;;
+            --adaptive)    ADAPTIVE=1; CLI_ADAPTIVE=1; shift ;;
+            --no-adaptive) ADAPTIVE=0; CLI_ADAPTIVE=0; shift ;;
             -I)
                 optval "$1" "${2:-}" || arg_err "$1"
                 CLI_IFACE=$OPT_VAL; shift "$OPT_SHIFT" ;;

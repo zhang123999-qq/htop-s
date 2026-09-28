@@ -52,7 +52,7 @@ chmod +x /usr/local/bin/htop-s && htop-s
 
 > **不分发范围**：`tests/`、`docs/internal/`、`.build/`、`dist/`、`.archive/` 均已列入
 > `.gitignore`，**不随仓库分发**；仓库对外只提供上表中的交付文件。
-> 只拿到单文件时，用 `htop-s --selftest` 做验证（内置 **51 项**自测，不依赖外部文件）。
+> 只拿到单文件时，用 `htop-s --selftest` 做验证（内置 **107 项**自测，不依赖外部文件）。
 
 ---
 
@@ -178,7 +178,7 @@ HT_S_PROC=tests/mock/proc HT_S_ROOT=tests/mock/sys HT_S_ETC=tests/mock/etc \
   PATH=tests/mock/bin:$PATH bash htop-s -n
 ```
 
-内置自测（含 bash 3.2 兼容性静态扫描、i18n 变量完整性、单位换算、日期算术、CPU 差分、TCP 小端序解析、默认网关解码、进程排序键 n/i 等 **51 项**）：
+内置自测（含 bash 3.2 兼容性静态扫描、i18n 变量完整性、单位换算、日期算术、CPU 差分、TCP 小端序解析、默认网关解码、进程排序键 n/i 等 **107 项**）：
 
 ```bash
 htop-s --selftest
@@ -194,6 +194,9 @@ htop-s --selftest
 - **分层**：采集层（`/proc` `/sys`）→ 聚合层（awk 一次算完多键聚合）→ 缓存层（分帧）→ 渲染层（备用屏缓冲）
 - **分帧调度**：秒级指标随面板刷新（默认 1s），磁盘 IO / TOP 进程 10s，磁盘容量 / 温度 / 系统信息 60s。
   避免「监控脚本自己拖慢服务器」
+- **自适应刷新**：CPU ≥85% 连续 3 帧自动降频 1s→2s→5s，CPU ≤60% 连续 5 帧逐步恢复；
+  阈值迟滞 + 连续帧计数防抖动。默认开启，`--no-adaptive` / 配置 `adaptive=0` 关闭，
+  手动 `-i` / `+`/`-` 后自动关闭（手动优先），面板内按 `a` 可随时开关
 - **双进程模型**：面板只读状态文件，daemon 独占写，互不干扰
 - **时钟源**：用 `/proc/uptime`（10ms 精度）而非 `date +%s%N`，busybox 也支持
 - **免 fork 渲染**：`printf -v` 直接写变量，每帧省掉约 50 次子 shell
