@@ -1512,36 +1512,25 @@ https://github.com/<owner>/<repo>/releases/latest/download/<asset>
 
 ### 18.5 发版流程
 
+用 `scripts/release.sh`（已把 打 tag → 建 Release → 传附件 → 验证下载链
+锁成固定流程，勿手动拆步执行）：
+
 ```bash
-# 1. 改版本号
-$EDITOR htop-s              # VERSION="0.0.6"
-
-# 2. 自测
-htop-s --selftest              # 内置 70 项, 任何环境都能跑
-bash tests/run-tests.sh        # 本地开发环境专用; tests/ 不随仓库分发
-
-# 3. 提交
-git add -A && git commit -m "htop-s 0.0.6"
+# 1. 改版本号并提交（按历史惯例：单个 release: vX.Y.Z 提交）
+$EDITOR htop-s              # VERSION="0.0.8"
+bash htop-s --selftest      # 须全部通过
+git add -A && git commit -m "release: v0.0.8 ..."
 git push origin main
 
-# 4. 构建产物
-rm -rf dist && mkdir dist
-cp htop-s dist/htop-s && cp install.sh dist/install.sh
-chmod +x dist/htop-s dist/install.sh
-(cd dist && sha256sum htop-s install.sh > htop-s.sha256)
-
-# 5. 打 tag
-git tag -a v0.0.6 -m "htop-s 0.0.6"
-git push origin v0.0.6
-
-# 6. 发布
-gh release create v0.0.5 dist/htop-s dist/install.sh dist/htop-s.sha256 \
-  --title "v0.0.5" --notes-file dist/notes.md
-
-# 7. 验证线上可下
-curl -fsSL -x http://127.0.0.1:10808 \
-  https://github.com/zhang123999-qq/htop-s/releases/latest/download/htop-s | head -1
+# 2. 发布（脚本做：版本一致性检查 → 打 tag → 建 Release → 传附件 → 验证下载链）
+scripts/release.sh v0.0.8 [-m "说明" | -F notes.md]
 ```
+
+> **红线：已发布的 tag 绝不能直接删/移动。** 删远程 tag 会让 GitHub
+> Release 变成孤儿 draft（附件 URL 全变 `untagged-...`，
+> `latest/download` 还可能走 CDN 缓存给旧文件）。如必须重打 tag，
+> 正确顺序是**先删 Release，再删 tag** —— `scripts/release.sh
+> vX.Y.Z --force-retag` 已按此顺序实现；无此旗标时脚本直接拒绝。
 
 ### 18.6 代理
 
